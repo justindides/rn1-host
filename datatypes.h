@@ -79,11 +79,11 @@ typedef struct
 } sonar_point_t;
 
 
-typedef struct
+typedef struct __attribute__((packed))
 {
 	int32_t x;
 	int32_t y;
-	int16_t z;
+	int32_t z;
 } xyz_t;
 
 
@@ -113,6 +113,19 @@ typedef struct
 extern pwr_status_t pwr_status;
 extern xymove_t cur_xymove;
 
+typedef struct __attribute__((packed))
+{
+	int16_t first_movement_needed; // distance the robot needed to go fwd or back as the very first operation. 0 if within tolerances. in mm.
+	uint8_t turning_passes_needed; // optical positioning needed to move the robot this many passes without needing to back of / go forward again (adjusting angle was enough alone)
+	uint8_t vexling_passes_needed; // optical positioning needed to move the robot this many passes, doing a back-off-go-forward pass.
+	uint8_t accepted_pos;          // 1, if optical positioning succesful. 0 if failed there.
+	int16_t dist_before_push;      // after succesful optical positioning, the measured distance to the charger right before the push. in mm.
+	uint8_t result;                // 100 = success. Others = failure.
+} chafind_results_t;
+
+extern chafind_results_t chafind_results;
+
+
 #define MAP_SIGNIFICANT_IMGS     1
 #define MAP_SEMISIGNIFICANT_IMGS 2
 extern int map_significance_mode;
@@ -129,5 +142,56 @@ typedef enum
 	INFO_STATE_CHARGING = 6,
 	INFO_STATE_DAIJUING = 7
 } info_state_t;
+
+#define USER_IN_COMMAND 0
+#define EXPLORATION     1
+
+#define STATE_VECT_LEN 16
+typedef union __attribute__((packed))
+{
+	struct __attribute__((packed))
+	{
+		uint8_t loca_2d;
+		uint8_t loca_3d;
+		uint8_t mapping_2d;
+		uint8_t mapping_3d;
+		uint8_t mapping_collisions;
+		uint8_t keep_position;
+		uint8_t command_source;
+		uint8_t localize_with_big_search_area;
+		uint8_t reserved2;
+		uint8_t reserved3;
+		uint8_t reserved4;
+		uint8_t reserved5;
+		uint8_t reserved6;
+		uint8_t reserved7;
+		uint8_t reserved8;
+		uint8_t reserved9;
+	} v;
+
+	uint8_t table[STATE_VECT_LEN];
+} state_vect_t; // if the length changes, tcp_parser.c requires modification
+
+static const char* state_vect_names[STATE_VECT_LEN] =
+{
+	"2D localization",
+	"3D localization",
+	"2D mapping",
+	"3D mapping",
+	"collision mapping",
+	"motors on",
+	"autonomous exploration",
+	"big localization area",
+	"reserved",
+	"reserved",
+	"reserved",
+	"reserved",
+	"reserved",
+	"reserved",
+	"reserved",
+	"reserved"
+};
+
+extern state_vect_t state_vect;
 
 #endif

@@ -101,16 +101,8 @@ tcp_message_t msgmeta_cr_maintenance =
 	8, "ii"
 };
 
-tcp_cr_speedlim_t msg_cr_speedlim;
-tcp_message_t msgmeta_cr_speedlim =
-{
-	&msg_cr_speedlim,
-	TCP_CR_SPEEDLIM_MID,
-	5, "BBBBB"
-};
 
-
-#define NUM_CR_MSGS 9
+#define NUM_CR_MSGS 8
 tcp_message_t* CR_MSGS[NUM_CR_MSGS] =
 {
 	&msgmeta_cr_dest,
@@ -120,8 +112,7 @@ tcp_message_t* CR_MSGS[NUM_CR_MSGS] =
 	&msgmeta_cr_manu,
 	&msgmeta_cr_addconstraint,
 	&msgmeta_cr_remconstraint,
-	&msgmeta_cr_maintenance,
-	&msgmeta_cr_speedlim
+	&msgmeta_cr_maintenance
 };
 
 // Robot->Client messages
@@ -129,28 +120,9 @@ tcp_message_t msgmeta_rc_pos =
 {
 	0,
 	TCP_RC_POS_MID,
-	11, "siiB"
+	10, "sii"
 };
 tcp_rc_pos_t    msg_rc_pos;
-
-
-tcp_message_t msgmeta_rc_movement_status =
-{
-	0,
-	TCP_RC_MOVEMENT_STATUS_MID,
-	34, "siiiibsiiBI"
-};
-tcp_rc_movement_status_t    msg_rc_movement_status;
-
-
-tcp_message_t msgmeta_rc_route_status =
-{
-	0,
-	TCP_RC_ROUTE_STATUS_MID,
-	31, "siiiisiiBs"
-};
-tcp_rc_route_status_t    msg_rc_route_status;
-
 
 #define I32TOBUF(i_, b_, s_) {b_[(s_)] = ((i_)>>24)&0xff; b_[(s_)+1] = ((i_)>>16)&0xff; b_[(s_)+2] = ((i_)>>8)&0xff; b_[(s_)+3] = ((i_)>>0)&0xff; }
 #define I16TOBUF(i_, b_, s_) {b_[(s_)] = ((i_)>>8)&0xff; b_[(s_)+1] = ((i_)>>0)&0xff; }

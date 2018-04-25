@@ -122,18 +122,6 @@ typedef struct __attribute__ ((packed))
 
 extern tcp_cr_maintenance_t   msg_cr_maintenance;
 
-#define TCP_CR_SPEEDLIM_MID    63
-typedef struct __attribute__ ((packed))
-{
-	uint8_t speedlim_linear_fwd;  // right now, sets both linear (fwd and back) and angular speedlimit. 1..100. 0 = use default limit. Note that actual speedlimit may always be lower due to nearby obstacles.
-	uint8_t speedlim_linear_back; // for future use, not implemented yet 
-	uint8_t speedlim_angular; // for future use, not implemented yet
-	uint8_t accellim_linear;  // for future use, not implemented yet
-	uint8_t accellim_angular; // for future use, not implemented yet
-} tcp_cr_speedlim_t;
-
-extern tcp_cr_speedlim_t   msg_cr_speedlim;
-
 
 #define TCP_RC_POS_MID    130
 typedef struct __attribute__ ((packed))
@@ -141,61 +129,10 @@ typedef struct __attribute__ ((packed))
 	int16_t ang;
 	int32_t x;
 	int32_t y;
-	uint8_t  cmd_state; // Message ID of the command/job the robot is currently taking (for example, TCP_CR_ROUTE_MID)
 } tcp_rc_pos_t;
 
 extern tcp_message_t   msgmeta_rc_pos;
 extern tcp_rc_pos_t    msg_rc_pos;
-
-
-#define TCP_RC_MOVEMENT_STATUS_SUCCESS 0
-#define TCP_RC_MOVEMENT_STATUS_STOPPED 1
-#define TCP_RC_MOVEMENT_STATUS_STOPPED_BY_FEEDBACK_MODULE 1
-#define TCP_RC_MOVEMENT_STATUS_MID  143
-typedef struct __attribute__ ((packed))
-{
-	int16_t start_ang;
-	int32_t start_x;
-	int32_t start_y;
-
-	int32_t requested_x;
-	int32_t requested_y;
-	int8_t requested_backmode;
-
-	int16_t cur_ang;
-	int32_t cur_x;
-	int32_t cur_y;
-
-	uint8_t status;
-	uint32_t obstacle_flags;
-} tcp_rc_movement_status_t;
-extern tcp_message_t   msgmeta_rc_movement_status;
-extern tcp_rc_movement_status_t    msg_rc_movement_status;
-
-
-#define TCP_RC_ROUTE_STATUS_SUCCESS 0
-#define TCP_RC_ROUTE_STATUS_NOTFOUND 1
-#define TCP_RC_ROUTE_STATUS_UNDEFINED 2
-#define TCP_RC_ROUTE_STATUS_MID  144
-typedef struct __attribute__ ((packed))
-{
-	int16_t start_ang;
-	int32_t start_x;
-	int32_t start_y;
-
-	int32_t requested_x;
-	int32_t requested_y;
-
-	int16_t cur_ang;
-	int32_t cur_x;
-	int32_t cur_y;
-
-	uint8_t status;
-	int16_t num_reroutes;
-} tcp_rc_route_status_t;
-extern tcp_message_t   msgmeta_rc_route_status;
-extern tcp_rc_route_status_t    msg_rc_route_status;
-
 
 #define TCP_RC_LIDAR_LOWRES_MID     131
 #define TCP_RC_DBG_MID              132
@@ -209,8 +146,6 @@ extern tcp_rc_route_status_t    msg_rc_route_status;
 #define TCP_RC_ROBOTINFO_MID        140
 #define TCP_RC_LIDAR_HIGHRES_MID    141
 #define TCP_RC_PICTURE_MID	    142
-
-
 
 int tcp_parser(int sock);
 

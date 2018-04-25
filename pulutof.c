@@ -1,5 +1,5 @@
-//#define SPI_PRINT_DBG
-//#define TOF_SW_POSE // define to use (non-realtime) position from software, in case there is something wrong with HW-provided robot pose, or it's not available
+#define SPI_PRINT_DBG
+
 /*
 	PULUROBOT RN1-HOST Computer-on-RobotBoard main software
 
@@ -51,7 +51,6 @@
 
 #define PULUTOF_SPI_DEVICE "/dev/spidev0.0"
 
-extern volatile int verbose_mode;
 
 static int spi_fd;
 static volatile int running = 1;
@@ -252,10 +251,10 @@ typedef struct
 #ifdef PULUTOF_ROBOT_SER_1_TO_4  // Retrofitted sensors
 static const sensor_mount_t sensor_mounts[NUM_PULUTOFS] =
 {          //      mountmode    x     y       hor ang           ver ang      height    
- /*0: Left rear      */ { 2,  -276,  -233, DEGTORAD(      90), DEGTORAD(  0), 227 },
- /*1: Right rear     */ { 1,  -276,   233, DEGTORAD(     270), DEGTORAD(  0), 227 },
- /*2: Right front    */ { 2,   154,   164, DEGTORAD(       0), DEGTORAD(  0), 228 },
- /*3: Left front     */ { 1,   154,  -164, DEGTORAD(       0), DEGTORAD(  0), 228 }
+ /*0: Left rear      */ { 2,  -276,  -233, DEGTORAD(      90), DEGTORAD( -2), 217 },
+ /*1: Right rear     */ { 1,  -276,   233, DEGTORAD(     270), DEGTORAD(  0), 180 },
+ /*2: Right front    */ { 2,   154,   164, DEGTORAD(       0), DEGTORAD( -3), 170 },
+ /*3: Left front     */ { 1,   154,  -164, DEGTORAD(       0), DEGTORAD( -3), 208 }
 };
 #endif
 
@@ -327,7 +326,7 @@ static void distances_to_objmap(pulutof_frame_t *in)
 				}
 			}
 
-			if(n_valids > 4)
+			if(n_valids > 6)
 			{
 				avg /= n_valids;
 				int n_conforming = 0;
@@ -338,7 +337,7 @@ static void distances_to_objmap(pulutof_frame_t *in)
 					for(int dxx=-1; dxx<=1; dxx++)
 					{
 						int dist = in->depth[(pyy+dyy)*TOF_XS+(pxx+dxx)];
-						if(dist != 0 && dist > avg-350 && dist < avg+350)
+						if(dist != 0 && dist > avg-400 && dist < avg+400)
 						{
 							n_conforming++;
 							avg_conforming += dist;
@@ -348,7 +347,7 @@ static void distances_to_objmap(pulutof_frame_t *in)
 					}
 				}
 
-				if(n_conforming > 2)
+				if(n_conforming > 4)
 				{
 					int py, px;
 					if(cumul_dxx < -2) px = pxx-1; else if(cumul_dxx > 2) px = pxx+1; else px = pxx;
@@ -385,58 +384,53 @@ static void distances_to_objmap(pulutof_frame_t *in)
 
 					float d = (float)avg_conforming/(float)n_conforming;
 
+				//	d *= 0.84; // don't understand why, yet. Seems to be a very consistent error!
+					d *= 0.90;
+
 					float x = d * /*sin*/cos(ver_ang + sensor_yang) * cos(hor_ang + sensor_ang) + sensor_x;
 					float y = -1* (d * /*sin*/cos(ver_ang + sensor_yang) * sin(hor_ang + sensor_ang)) + sensor_y;
 					float z = d * /*cos*/sin(ver_ang + sensor_yang) + sensor_z;
 
-					if(z > 700 || (z > -180.0 && z < 130.0) || (n_valids > 7 && n_conforming > 5))
+					int xspot = (int)(x / (float)TOF3D_HMAP_SPOT_SIZE) + TOF3D_HMAP_XMIDDLE;
+					int yspot = (int)(y / (float)TOF3D_HMAP_SPOT_SIZE) + TOF3D_HMAP_YMIDDLE;
+
+					//printf("DIST = %.0f  x=%.0f  y=%.0f  z=%.0f  xspot=%d  yspot=%d  ver_ang=%.2f  sensor_yang=%.2f  hor_ang=%.2f  sensor_ang=%.2f\n", d, x, y, z, xspot, yspot, ver_ang, sensor_yang, hor_ang, sensor_ang); 
+
+					if(xspot < 0 || xspot >= TOF3D_HMAP_XSPOTS || yspot < 0 || yspot >= TOF3D_HMAP_YSPOTS)
 					{
-						// Data proving level floor is accepted with fewer samples
-						// High-z data is also accepted with fewer samples; else we miss obvious small high obstacles
-						// Otherwise, we require enough samples to be sure.
-
-						int xspot = (int)(x / (float)TOF3D_HMAP_SPOT_SIZE) + TOF3D_HMAP_XMIDDLE;
-						int yspot = (int)(y / (float)TOF3D_HMAP_SPOT_SIZE) + TOF3D_HMAP_YMIDDLE;
-
-						//printf("DIST = %.0f  x=%.0f  y=%.0f  z=%.0f  xspot=%d  yspot=%d  ver_ang=%.2f  sensor_yang=%.2f  hor_ang=%.2f  sensor_ang=%.2f\n", d, x, y, z, xspot, yspot, ver_ang, sensor_yang, hor_ang, sensor_ang); 
-
-						if(xspot < 0 || xspot >= TOF3D_HMAP_XSPOTS || yspot < 0 || yspot >= TOF3D_HMAP_YSPOTS)
-						{
-							//ignored++;
-							continue;
-						}
-
-	/*					int zi = z;
-						if(zi > -2000 && zi < 2000)
-						{
-							if(zi > hmap_accum[xspot][yspot])
-								hmap_accum[xspot][yspot] = zi;
-							hmap_nsamples[xspot][yspot]++;
-						}
-	*/
-
-						uint8_t new_val = 0;
-						if( z < -230.0)
-							new_val = TOF3D_BIG_DROP;
-						else if(z < -180.0)
-							new_val = TOF3D_SMALL_DROP;
-						else if(z < 130.0)
-							new_val = TOF3D_FLOOR;
-						else if(z < 160.0)
-							new_val = TOF3D_THRESHOLD;
-						else if(z < 265.0)
-							new_val = TOF3D_SMALL_ITEM;
-						else if(z < 295.0)
-							new_val = TOF3D_WALL;
-						else if(z < 1500.0)
-							new_val = TOF3D_BIG_ITEM;
-						else if(z < 2050.0)
-							new_val = TOF3D_LOW_CEILING;
-
-						if(new_val > tof3ds[tof3d_wr].objmap[yspot*TOF3D_HMAP_XSPOTS+xspot])
-							tof3ds[tof3d_wr].objmap[yspot*TOF3D_HMAP_XSPOTS+xspot] = new_val;
+						//ignored++;
+						continue;
 					}
 
+/*					int zi = z;
+					if(zi > -2000 && zi < 2000)
+					{
+						if(zi > hmap_accum[xspot][yspot])
+							hmap_accum[xspot][yspot] = zi;
+						hmap_nsamples[xspot][yspot]++;
+					}
+*/
+
+					z -= 50.0;
+
+					uint8_t new_val = 0;
+					if( z < -250.0)
+						new_val = TOF3D_BIG_DROP;
+					else if(z < -200.0)
+						new_val = TOF3D_SMALL_DROP;
+					else if(z < 110.0)
+						new_val = TOF3D_FLOOR;
+					else if(z < 170.0)
+						new_val = TOF3D_THRESHOLD;
+					else if(z < 265.0)
+						new_val = TOF3D_SMALL_ITEM;
+					else if(z < 295.0)
+						new_val = TOF3D_WALL;
+					else if(z < 2100.0)
+						new_val = TOF3D_BIG_ITEM;
+
+					if(new_val > tof3ds[tof3d_wr].objmap[yspot*TOF3D_HMAP_XSPOTS+xspot])
+						tof3ds[tof3d_wr].objmap[yspot*TOF3D_HMAP_XSPOTS+xspot] = new_val;
 				}
 				
 			}
@@ -482,11 +476,10 @@ void* pulutof_processing_thread()
 
 }
 static void process_objmap();
-#ifdef TOF_SW_POSE
 extern pthread_mutex_t cur_pos_mutex;
 extern int32_t cur_ang, cur_x, cur_y;
 int32_t tof3d_obstacle_levels[3];
-#endif
+
 
 static void process_pulutof_frame(pulutof_frame_t *in)
 {
@@ -536,20 +529,11 @@ static void process_pulutof_frame(pulutof_frame_t *in)
 
 			if(sidx == 2)
 			{
-#ifdef TOF_SW_POSE
 				pthread_mutex_lock(&cur_pos_mutex);
 				tof3ds[tof3d_wr].robot_pos.ang = cur_ang;
 				tof3ds[tof3d_wr].robot_pos.x = cur_x;
 				tof3ds[tof3d_wr].robot_pos.y = cur_y;
 				pthread_mutex_unlock(&cur_pos_mutex);
-#else
-				tof3ds[tof3d_wr].robot_pos = in->robot_pos;
-#endif
-			}
-
-			if(sidx == send_raw_tof)
-			{
-				memcpy(tof3ds[tof3d_wr].raw_depth, in->depth, sizeof tof3ds[tof3d_wr].raw_depth);
 			}
 
 			if(sidx == NUM_PULUTOFS-1)
@@ -686,6 +670,7 @@ static void process_objmap()
 						}
 					}
 				}
+				
 				fwrite(hmap_calib, 2, TOF3D_HMAP_XSPOTS*TOF3D_HMAP_YSPOTS, floor);
 				fclose(floor);
 
@@ -1071,6 +1056,7 @@ static int poll_availability()
 	//printf("status=%d\n", response.status);
 	return response.status;
 }
+//#define SPI_PRINT_DBG
 
 static int read_frame()
 {
@@ -1090,28 +1076,27 @@ static int read_frame()
 		return -1;
 	}
 
-	if(verbose_mode)
+#ifdef SPI_PRINT_DBG
+	printf("Frame (sensor_idx= %d) read ok, timing:\n", pulutof_ringbuf[pulutof_ringbuf_wr].sensor_idx);
+	for(int i=0; i<24; i++)
 	{
-		printf("Frame (sensor_idx= %d) read ok, pose=(%d,%d,%d). Timing data:\n", pulutof_ringbuf[pulutof_ringbuf_wr].sensor_idx, pulutof_ringbuf[pulutof_ringbuf_wr].robot_pos.x, pulutof_ringbuf[pulutof_ringbuf_wr].robot_pos.y, pulutof_ringbuf[pulutof_ringbuf_wr].robot_pos.ang);
-		for(int i=0; i<24; i++)
-		{
-			printf("%d:%.1f ", i, (float)pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i]/10.0);
-		}
-		printf("\n");
-		printf("Time deltas to:\n");
-		for(int i=1; i<24; i++)
-		{
-			printf(">%d:%.1f ", i, (float)(pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i]-pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i-1])/10.0);
-		}
-		printf("\n");
-		printf("dbg_i32:\n");
-		for(int i=0; i<8; i++)
-		{
-			printf("[%d] %11d  ", i, pulutof_ringbuf[pulutof_ringbuf_wr].dbg_i32[i]);
-		}
-		printf("\n");
-		printf("\n");
+		printf("%d:%.1f ", i, (float)pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i]/10.0);
 	}
+	printf("\n");
+	printf("Time deltas to:\n");
+	for(int i=1; i<24; i++)
+	{
+		printf(">%d:%.1f ", i, (float)(pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i]-pulutof_ringbuf[pulutof_ringbuf_wr].timestamps[i-1])/10.0);
+	}
+	printf("\n");
+	printf("dbg_i32:\n");
+	for(int i=0; i<8; i++)
+	{
+		printf("[%d] %11d  ", i, pulutof_ringbuf[pulutof_ringbuf_wr].dbg_i32[i]);
+	}
+	printf("\n");
+	printf("\n");
+#endif
 
 	int ret = pulutof_ringbuf[pulutof_ringbuf_wr].status;
 
@@ -1169,7 +1154,7 @@ void* pulutof_poll_thread()
 		if(avail < 0)
 		{
 #ifdef SPI_PRINT_DBG
-		//	printf("Sleeping 2 s\n");
+			printf("Sleeping 2 s\n");
 #endif
 			sleep(2);
 			continue;
@@ -1178,7 +1163,7 @@ void* pulutof_poll_thread()
 		if(avail < 250)
 		{
 #ifdef SPI_PRINT_DBG
-		//	printf("Sleeping %d ms\n", avail);
+			printf("Sleeping %d ms\n", avail);
 #endif
 			usleep(1000*avail);
 			continue;

@@ -1,5 +1,3 @@
-//#define MOTCON_PID_EXPERIMENT
-
 /*
 	PULUROBOT RN1-HOST Computer-on-RobotBoard main software
 
@@ -21,7 +19,6 @@
 
 */
 
-//#define PULUTOF1_GIVE_RAWS
 
 #define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
@@ -54,16 +51,9 @@
 
 #include "mcu_micronavi_docu.c"
 
-#define DEFAULT_SPEEDLIM 45
-#define MAX_CONFIGURABLE_SPEEDLIM 70
 
-volatile int verbose_mode = 0;
-volatile int send_raw_tof = -1;
-
-int max_speedlim = DEFAULT_SPEEDLIM;
-int cur_speedlim = DEFAULT_SPEEDLIM;
-
-#define SPEED(x_) do{ cur_speedlim = ((x_)>max_speedlim)?(max_speedlim):(x_); } while(0);
+int max_speedlim = 45;
+int cur_speedlim = 45;
 
 double subsec_timestamp()
 {
@@ -84,8 +74,6 @@ int map_significance_mode = MAP_SEMISIGNIFICANT_IMGS | MAP_SIGNIFICANT_IMGS;
 int motors_on = 1;
 
 uint32_t robot_id = 0xacdcabba; // Hopefully unique identifier for the robot.
-
-int cmd_state;
 
 extern world_t world;
 #define BUFLEN 2048
@@ -121,11 +109,35 @@ int good_time_for_lidar_mapping = 0;
 #define NUM_LATEST_LIDARS_FOR_ROUTING_START 7
 lidar_scan_t* lidars_to_map_at_routing_start[NUM_LATEST_LIDARS_FOR_ROUTING_START];
 
+/**
+* Calls the function wich send the tcp/ip state info 
+*
+* Input parameters:
+* info_state_t state : State of the tcp/ip communication (ex :"Think", "Iddle", "Daiju_mode")
+* Input memory areas:
+* None
+* Output memory areas:
+* None
+* Return value:
+* None
+*/
 void send_info(info_state_t state)
 {
 	if(tcp_client_sock >= 0) tcp_send_info_state(state);
 }
 
+/*
+* Calls the function wich send the tcp/ip state info 
+*
+* Input parameters:
+* info_state_t state : State of the tcp/ip communicaiton 
+* Input memory areas:
+* None
+* Output memory areas:
+* None
+* Return value:
+* 
+*/
 int32_t prev_search_dest_x, prev_search_dest_y;
 int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight)
 {
@@ -180,7 +192,6 @@ int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight
 
 	the_route[len-1].take_next_early = 20;
 
-	msg_rc_route_status.num_reroutes++;
 
 	tcp_send_route(cur_x, cur_y, &some_route);
 
@@ -204,23 +215,6 @@ int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight
 
 	return ret;
 
-}
-
-void send_route_end_status(uint8_t reason)
-{
-	if(cmd_state == TCP_CR_ROUTE_MID)
-	{
-		if(tcp_client_sock >= 0)
-		{
-			msg_rc_route_status.cur_ang = cur_ang>>16;
-			msg_rc_route_status.cur_x = cur_x;
-			msg_rc_route_status.cur_y = cur_y;
-			msg_rc_route_status.status = reason;
-			tcp_send_msg(&msgmeta_rc_route_status, &msg_rc_route_status);
-		}
-
-		cmd_state = 0;
-	}
 }
 
 int rerun_search()
@@ -313,7 +307,7 @@ void do_live_obstacle_checking()
 
 				if( (abs(side_drifts[best_drift_idx]) < 50) || ( abs(side_drifts[best_drift_idx]) < 100 && drift_angles[best_angle_idx] < M_PI/13.0))
 				{
-					SPEED(18);
+					cur_speedlim = 18;
 					limit_speed(cur_speedlim);
 //					printf("!!!!!!!!!!   Steering is almost needed (not performed) to maintain line-of-sight, hitcnt now = %d, optimum drift = %.1f degs, %d mm (hitcnt=%d), cur(%d,%d) to(%d,%d)\n",
 //						hitcnt, RADTODEG(drift_angles[best_angle_idx]), side_drifts[best_drift_idx], best_hitcnt, cur_x, cur_y, best_new_x, best_new_y);
@@ -342,13 +336,13 @@ void do_live_obstacle_checking()
 				if(hitcnt < 3)
 				{
 //					printf("!!!!!!!!!!!  Direct line-of-sight to the next point has 1..2 obstacles, slowing down.\n");
-					SPEED(18);
+					cur_speedlim = 18;
 					limit_speed(cur_speedlim);
 				}
 				else
 				{
 //					printf("Direct line-of-sight to the next point has disappeared! Trying to solve.\n");
-					SPEED(18);
+					cur_speedlim = 18;
 					limit_speed(cur_speedlim);
 					stop_movement();
 					lookaround_creep_reroute = 1;
@@ -360,16 +354,37 @@ void do_live_obstacle_checking()
 	}
 }
 
+
+/*
+*Called by main_thread()
+*
+* Here we have the following route function. It describe the protocol to follow when the robot has a route or not. This protocol consists in looking if it is possible to follow the route, if it´s not the robot will creep a little bit arround him to find another way to get to the route. If there´s still no way to follow the route, it will try to reroute. If the 
+rerouting fails (no route found), the robot will go daiju mode to find a position where you can reroute. To do this, it uses the movement (hwdata) and routing functions such as : move_to(), turn_abs_and_go_rel(), line_of_sight(), check_drect_route, test_robot_turning...     What About Micronavi ?? 
+*
+* Input parameters:
+* none
+*
+* Input memory areas:
+* static int micronavi_stops; static double timestamp;double stamp; static int creep_cnt; int creep amount; int dx/y;int ang; int dest_x/y;int id; int prev_incr
+*
+* Output memory areas:
+* lookaround_creep_reroute : This describe at wich "step" of the protocol we are in. Goes from 0(no protocol) to step 12; do_follow_route; route_finished_or_notfound; route_pos;
+start_route; id_cnt;good_time_for_lidar_mapping;cur_x/y; the_route[route_pos].x/y; cur_xy_move.micronavi/feedback_stop_flags; cur_xy_move.remaining
+*
+* Return value:
+*  none (void)
+*/
+
 void route_fsm()
 {
 	static int micronavi_stops = 0;
 	static double timestamp;
 	static int creep_cnt;
 
-	if(lookaround_creep_reroute)
+	if(lookaround_creep_reroute)  
 	{
 		if(check_direct_route_non_turning_mm(cur_x, cur_y, the_route[route_pos].x, the_route[route_pos].y))
-		{
+		{// If there's a direct route without the need to turn, use it
 			printf("Direct line-of-sight has appeared to the next waypoint, resuming following the route.\n");
 			lookaround_creep_reroute = 0;
 			do_follow_route = 1;
@@ -381,7 +396,12 @@ void route_fsm()
 
 	const float lookaround_turn = 10.0;
 
-	if(lookaround_creep_reroute == 1)
+	// Those 6 next step are made to check if there are any obstacles around the route toward the destination. If possible, the robot will turn toward
+	// the right of the destination and then to the left to cover the interval [destination-1.8*lookaround_turn;destination+1.8*lookaround_turn]. 
+	// When this checking is done, it will turn toward the destination.
+	 
+	
+	if(lookaround_creep_reroute == 1)   // The robot backs off 50mm to reroute
 	{
 		do_follow_route = 0;
 		start_route = 0;
@@ -389,14 +409,14 @@ void route_fsm()
 		printf("Lookaround, creep & reroute procedure started; backing off 50 mm.\n");
 		turn_and_go_abs_rel(cur_ang, -50, 13, 1);
 		timestamp = subsec_timestamp();
-		lookaround_creep_reroute++;
+		lookaround_creep_reroute++;  //Go to the next step
 	}
 	else if(lookaround_creep_reroute == 2)
 	{
 		double stamp;
 		if( (stamp=subsec_timestamp()) > timestamp+1.0)
 		{
-			if(doing_autonomous_things())
+			if(doing_autonomous_things()) // The robot is mapping, we'll research for a route
 			{
 				printf("Robot is mapping autonomously: no need to clear the exact route right now, skipping lookaround & creep\n");
 				rerun_search();
@@ -404,25 +424,25 @@ void route_fsm()
 			}
 			else
 			{
-				int dx = the_route[route_pos].x - cur_x;
+				int dx = the_route[route_pos].x - cur_x; //Relatives X and Y of the destination. Then calculate the angle
 				int dy = the_route[route_pos].y - cur_y;
-				float ang = atan2(dy, dx) /*<- ang to dest*/ - DEGTORAD(lookaround_turn);
+				float ang = atan2(dy, dx) /*<- ang to dest*/ - DEGTORAD(lookaround_turn); // First angle is destination-lookaround_turn
 
-				if(test_robot_turn_mm(cur_x, cur_y, ANG32TORAD(cur_ang),  ang))
+				if(test_robot_turn_mm(cur_x, cur_y, ANG32TORAD(cur_ang),  ang))	// If it is possible to turn toward this angle, does it.
 				{
 					//printf("Can turn to %.1f deg, doing it.\n", -1*lookaround_turn);
-					turn_and_go_abs_rel(RADTOANG32(ang), 0, 13, 1);
+					turn_and_go_abs_rel(RADTOANG32(ang), 0, 13, 1);  // Turn toward the angle
 				}
-				else
+				else   // If it is not possible,
 				{
 					//printf("Can't turn to %.1f deg, wiggling a bit.\n", -1*lookaround_turn);
-					turn_and_go_abs_rel(cur_ang-4*ANG_1_DEG, 0, 13, 1);
+					turn_and_go_abs_rel(cur_ang-4*ANG_1_DEG, 0, 13, 1); // If this angle is not reachable, just turn 4° from current location
 				}
 				timestamp = subsec_timestamp();
-				lookaround_creep_reroute++;
+				lookaround_creep_reroute++;  // goes to the next step
 			}
 		}
-	}
+	}	
 	else if(lookaround_creep_reroute == 3)
 	{
 		double stamp;
@@ -502,35 +522,32 @@ void route_fsm()
 			int dy = the_route[route_pos].y - cur_y;
 			float ang = atan2(dy, dx) /*<- ang to dest*/;
 
-			if(test_robot_turn_mm(cur_x, cur_y, ANG32TORAD(cur_ang),  ang))
-			{
+			if(test_robot_turn_mm(cur_x, cur_y, ANG32TORAD(cur_ang),  ang))   // After those last checkings, if it is possible turn toward the destination angle 
+			{																	// Then, go step 7.
 				//printf("Can turn towards the dest, doing it.\n");
 				turn_and_go_abs_rel(RADTOANG32(ang), 50, 13, 1);
 			}
-			else
+			else		// If the destination angle is not reachable, we'll have to reroute. If the reroute fails => Daiju mode on, then get to step 8
 			{
-				int reret;
 				printf("Can't turn towards the dest, rerouting.\n");
-				if((reret = rerun_search()) == 1)
+				if(rerun_search() == 1)
 				{
 					printf("Routing failed in start, going to daiju mode for a while.\n");
 					send_info(INFO_STATE_DAIJUING);
 					daiju_mode(1);
 					lookaround_creep_reroute = 8;
 				}
-				else
+				else	// If an other route is found, we remake the same checking procedure since step 1 with the new destination.
 				{
 					printf("Routing succeeded, or failed later. Stopping lookaround, creep & reroute procedure.\n");
-					if(reret != 0) send_route_end_status(reret);
-
-					lookaround_creep_reroute = 0;
+					lookaround_creep_reroute = 0;  
 				}
 			}
 			timestamp = subsec_timestamp();
 			lookaround_creep_reroute++;
 		}
 	}
-	else if(lookaround_creep_reroute == 7)
+	else if(lookaround_creep_reroute == 7)	// Step 7
 	{
 		static double time_interval = 2.5;
 		double stamp;
@@ -538,42 +555,40 @@ void route_fsm()
 		{
 			int dx = the_route[route_pos].x - cur_x;
 			int dy = the_route[route_pos].y - cur_y;
-			int dist = sqrt(sq(dx)+sq(dy));
+			int dist = sqrt(sq(dx)+sq(dy));	// Calculate the distance between the robot and the destination from the desination
 			if(dist > 300 && creep_cnt < 3)
 			{
 				float ang = atan2(dy, dx) /*<- ang to dest*/;
 				int creep_amount = 100;
 				int dest_x = cur_x + cos(ang)*creep_amount;
 				int dest_y = cur_y + sin(ang)*creep_amount;
-				int hitcnt = check_direct_route_non_turning_hitcnt_mm(cur_x, cur_y, dest_x, dest_y);
-				if(hitcnt < 1)
+				int hitcnt = check_direct_route_non_turning_hitcnt_mm(cur_x, cur_y, dest_x, dest_y); // Check how many obastacles there are towards the destination
+				if(hitcnt < 1)  // If the line of sight is clear, go 10cm forward to creep again
 				{
 					//printf("Can creep %d mm towards the next waypoint, doing it\n", creep_amount);
 					time_interval = 2.5;
 					turn_and_go_abs_rel(RADTOANG32(ang) + ((creep_cnt&1)?(5*ANG_1_DEG):(-5*ANG_1_DEG)), creep_amount, 15, 1);
 				}
-				else
+				else  // If there is no line of sight, we'll stop creeping 
 				{
 					creep_cnt=99;
 				}
 				creep_cnt++;
 			}
-			else
+			else // If we have to stop creeping or we have been creeping for too long (creep_cnt > 3) then, we'll search for another route
 			{
 				printf("We have creeped enough (dist to waypoint=%d, creep_cnt=%d), no line of sight to the waypoint, trying to reroute\n",
 					dist, creep_cnt);
-				int reret;
-				if((reret=rerun_search()) == 1)
+				if(rerun_search() == 1)	// If we can't find a route, go daiju mode and move to step 8
 				{
 					printf("Routing failed in start, going to daiju mode for a while.\n");
 					daiju_mode(1);
 					send_info(INFO_STATE_DAIJUING);
 					lookaround_creep_reroute++;
 				}
-				else
+				else	// If a route has been found, stop the procedure.
 				{
 					printf("Routing succeeded, or failed later. Stopping lookaround, creep & reroute procedure.\n");
-					if(reret != 0) send_route_end_status(reret);
 					lookaround_creep_reroute = 0;
 				}
 
@@ -581,15 +596,14 @@ void route_fsm()
 			timestamp = subsec_timestamp();
 		}
 	}
-	else if(lookaround_creep_reroute >= 8 && lookaround_creep_reroute < 12)
-	{
-		double stamp;
+	else if(lookaround_creep_reroute >= 8 && lookaround_creep_reroute < 12)	// Here we'll keep looking for a route in Daiju mode. If a route is found,
+	{									// stop the procedure. If not, we keep daijuing for some time. If we still
+		double stamp;							// can't find nothing, move to step 12.
 		if( (stamp=subsec_timestamp()) > timestamp+5.0)
 		{
 			printf("Daijued enough.\n");
 			daiju_mode(0);
-			int reret;
-			if((reret = rerun_search()) == 1)
+			if(rerun_search() == 1)
 			{
 				printf("Routing failed in start, going to daiju mode for a bit more...\n");
 				daiju_mode(1);
@@ -600,19 +614,18 @@ void route_fsm()
 			else
 			{
 				printf("Routing succeeded, or failed later. Stopping lookaround, creep & reroute procedure.\n");
-				if(reret != 0) send_route_end_status(reret);
 				lookaround_creep_reroute = 0;
 			}
 
 		}
 	}
-	else if(lookaround_creep_reroute == 12)
+	else if(lookaround_creep_reroute == 12)	// We haven't found a route, stop the look qround creep process ?
 	{
 		printf("Giving up lookaround, creep & reroute procedure!\n");
 		lookaround_creep_reroute = 0;
 	}
 
-	if(start_route)
+	if(start_route)	// If he has found a route during the process, goes toward it ?
 	{
 		printf("Start going id=%d!\n", id_cnt<<4);
 		move_to(the_route[route_pos].x, the_route[route_pos].y, the_route[route_pos].backmode, (id_cnt<<4), cur_speedlim, 0);
@@ -621,35 +634,37 @@ void route_fsm()
 		start_route = 0;
 	}
 
-	if(do_follow_route)
+	if(do_follow_route)  	// This part will start the previous procedure if there is a route to follow and the ids correspond ? (What IDS ?) 
 	{
 		int id = cur_xymove.id;
 
 		if(((id&0b1110000) == (id_cnt<<4)) && ((id&0b1111) == ((route_pos)&0b1111)))
 		{
-			if(cur_xymove.micronavi_stop_flags || cur_xymove.feedback_stop_flags)
+			if(cur_xymove.micronavi_stop_flags || cur_xymove.feedback_stop_flags) 
 			{
 				if(micronavi_stops < 7)
 				{
-					printf("Micronavi STOP, entering lookaround_creep_reroute\n");
+					printf("Micronavi STOP, entering lookaround_creep_reroute\n");  // That will remake the procedure until the conditions are false
 					micronavi_stops++;
 					lookaround_creep_reroute = 1;
 				}
 				else
 				{
-					printf("Micronavi STOP, too many of them already, rerouting.\n");
-					int reret;
-					if((reret=rerun_search()) != 0)
+					printf("Micronavi STOP, too many of them already, rerouting.\n");  // After too many procedure, it will reroute.
+					if(rerun_search() == 1)
 					{
-						printf("Routing failed.\n");
-						send_route_end_status(reret);
+						printf("Routing failed in start, todo: handle this situation.\n");
+					}
+					else
+					{
+						printf("Routing succeeded, or failed later.\n");
 					}
 				}
 			}
 			else if(id_cnt == 0) // Zero id move is a special move during route following
 			{
-				if(cur_xymove.remaining < 30)
-				{
+				if(cur_xymove.remaining < 30)  // If the next point to reach on the route has a direct line of sight, we´ĺl skip it and pass to the nexx 
+				{				// Point
 					while(the_route[route_pos].backmode == 0 && route_pos < the_route_len-1)
 					{
 						if( (sq(cur_x-the_route[route_pos+1].x)+sq(cur_y-the_route[route_pos+1].y) < sq(800) )
@@ -668,7 +683,6 @@ void route_fsm()
 					printf("Maneuver done, redo the waypoint, id=%d!\n", (id_cnt<<4) | ((route_pos)&0b1111));
 					move_to(the_route[route_pos].x, the_route[route_pos].y, the_route[route_pos].backmode, (id_cnt<<4) | ((route_pos)&0b1111), cur_speedlim, 0);
 					send_info(the_route[route_pos].backmode?INFO_STATE_REV:INFO_STATE_FWD);
-
 				}
 			}
 			else
@@ -712,7 +726,6 @@ void route_fsm()
 						micronavi_stops = 0;
 						do_follow_route = 0;
 						route_finished_or_notfound = 1;
-						send_route_end_status(TCP_RC_ROUTE_STATUS_SUCCESS);
 					}
 				}
 				else if(live_obstacle_checking_on)
@@ -825,7 +838,7 @@ volatile int retval = 0;
 
 void* main_thread()
 {
-	int find_charger_state = 0;
+	int find_charger_state = 0;		// Init variables and communication
 	if(init_uart())
 	{
 		fprintf(stderr, "uart initialization failed.\n");
@@ -858,11 +871,11 @@ void* main_thread()
 	set_hw_obstacle_avoidance_margin(0);
 
 	double chafind_timestamp = 0.0;
-	int lidar_ignore_over = 0;
-	while(1)
+	int lidar_ignore_over = 0;		// End init variable
+	while(1)	// Main Loop
 	{
 		// Calculate fd_set size (biggest fd+1)
-		int fds_size = 
+		int fds_size = 	// ?
 #ifdef SIMULATE_SERIAL
 			0;
 #else		
@@ -875,7 +888,7 @@ void* main_thread()
 
 
 		fd_set fds;
-		FD_ZERO(&fds);
+		FD_ZERO(&fds);   // Put the file descriptors of uart, tcp/ip socket file descriptor in fds
 #ifndef SIMULATE_SERIAL
 		FD_SET(uart, &fds);
 #endif
@@ -892,13 +905,11 @@ void* main_thread()
 			return NULL;
 		}
 
-#ifdef MOTCON_PID_EXPERIMENT
 		static uint8_t pid_i_max = 30;
 		static uint8_t pid_feedfwd = 30;
 		static uint8_t pid_p = 100;
 		static uint8_t pid_i = 20;
 		static uint8_t pid_d = 20;
-#endif
 
 		if(FD_ISSET(STDIN_FILENO, &fds))
 		{
@@ -913,7 +924,7 @@ void* main_thread()
 				retval = 5;
 				break;
 			}
-
+/*
 			if(cmd == 'S')
 			{
 				save_robot_pos();
@@ -922,7 +933,7 @@ void* main_thread()
 			{
 				retrieve_robot_pos();
 			}
-
+*/
 /*			if(cmd == 'c')
 			{
 				printf("Starting automapping from compass round.\n");
@@ -978,7 +989,6 @@ void* main_thread()
 				if(motors_on)
 				{
 					motors_on = 0;
-					release_motors();
 					printf("Robot is free to move manually.\n");
 				}
 				else
@@ -987,13 +997,6 @@ void* main_thread()
 					printf("Robot motors enabled again.\n");
 				}
 			}
-
-			if(cmd == 'V')
-			{
-				verbose_mode = verbose_mode?0:1;
-			}
-
-#ifdef PULUTOF1
 			if(cmd == 'z')
 			{
 				pulutof_decr_dbg();
@@ -1002,24 +1005,12 @@ void* main_thread()
 			{
 				pulutof_incr_dbg();
 			}
-			if(cmd == 'Z')
-			{
-				if(send_raw_tof >= 0) send_raw_tof--;
-				printf("Sending raw tof from sensor %d\n", send_raw_tof);
-			}
-			if(cmd == 'X')
-			{
-				if(send_raw_tof < 3) send_raw_tof++;
-				printf("Sending raw tof from sensor %d\n", send_raw_tof);
-			}
 			if(cmd >= '1' && cmd <= '4')
 			{
 				pulutof_cal_offset(cmd-'1');
 			}
-#endif
 
-#if 0
-			if(cmd >= '1' && cmd <= '9')
+/*			if(cmd >= '1' && cmd <= '9')
 			{
 				uint8_t bufings[3];
 				bufings[0] = 0xd0 + cmd-'0';
@@ -1028,9 +1019,6 @@ void* main_thread()
 				printf("Sending dev msg: %x\n", bufings[0]);
 				send_uart(bufings, 3);				
 			}
-#endif
-
-#ifdef MOTCON_PID_EXPERIMENT
 			if(cmd == 'A') {int tmp = (int)pid_i_max*5/4; if(tmp>255) tmp=255; pid_i_max=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'a') {int tmp = (int)pid_i_max*3/4; if(tmp<4) tmp=4;     pid_i_max=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'S') {int tmp = (int)pid_feedfwd*5/4; if(tmp>255) tmp=255; pid_feedfwd=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
@@ -1043,7 +1031,7 @@ void* main_thread()
 			if(cmd == 'g') {int tmp = (int)pid_d*3/4; if(tmp<4) tmp=4;     pid_d=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'z') {turn_and_go_rel_rel(0, 2000, 25, 1);}
 			if(cmd == 'Z') {turn_and_go_rel_rel(0, -2000, 25, 1);}
-#endif
+*/
 		}
 
 #ifndef SIMULATE_SERIAL
@@ -1056,31 +1044,20 @@ void* main_thread()
 		if(tcp_client_sock >= 0 && FD_ISSET(tcp_client_sock, &fds))
 		{
 			int ret = handle_tcp_client();
-			cmd_state = ret;
 			if(ret == TCP_CR_DEST_MID)
 			{
 				motors_on = 1;
 				daiju_mode(0);
-
-				msg_rc_movement_status.start_ang = cur_ang>>16;
-				msg_rc_movement_status.start_x = cur_x;
-				msg_rc_movement_status.start_y = cur_y;
-
-				msg_rc_movement_status.requested_x = msg_cr_dest.x;
-				msg_rc_movement_status.requested_y = msg_cr_dest.y;
-				msg_rc_movement_status.requested_backmode = msg_cr_dest.backmode;
-
-				cur_xymove.remaining = 999999; // invalidate
+				max_speedlim=40;
 
 				printf("  ---> DEST params: X=%d Y=%d backmode=0x%02x\n", msg_cr_dest.x, msg_cr_dest.y, msg_cr_dest.backmode);
-				if(msg_cr_dest.backmode & 0b1000) // Rotate pose
+				if(msg_cr_dest.backmode & 0b1000) // Pose
 				{
 					float ang = atan2(msg_cr_dest.y-cur_y, msg_cr_dest.x-cur_x);
 					turn_and_go_abs_rel(RADTOANG32(ang), 0, cur_speedlim, 1);
 				}
 				else
 					move_to(msg_cr_dest.x, msg_cr_dest.y, msg_cr_dest.backmode, 0, cur_speedlim, 1);
-
 				find_charger_state = 0;
 				lookaround_creep_reroute = 0;
 				do_follow_route = 0;
@@ -1089,29 +1066,24 @@ void* main_thread()
 			}
 			else if(ret == TCP_CR_ROUTE_MID)
 			{
-
 				printf("  ---> ROUTE params: X=%d Y=%d dummy=%d\n", msg_cr_route.x, msg_cr_route.y, msg_cr_route.dummy);
-
-				msg_rc_route_status.start_ang = cur_ang>>16;
-				msg_rc_route_status.start_x = cur_x;
-				msg_rc_route_status.start_y = cur_y;
-
-				msg_rc_route_status.requested_x = msg_cr_route.x;
-				msg_rc_route_status.requested_y = msg_cr_route.y;
-				msg_rc_route_status.status = TCP_RC_ROUTE_STATUS_UNDEFINED;
-				msg_rc_route_status.num_reroutes = -1;
 
 				motors_on = 1;
 				daiju_mode(0);
 				find_charger_state = 0;
-				int ret;
-				if((ret = run_search(msg_cr_route.x, msg_cr_route.y, 0, 1)) != 0)
+				max_speedlim=50;
+				if(run_search(msg_cr_route.x, msg_cr_route.y, 0, 1) == 1)
 				{
-					send_route_end_status(ret);
+					printf("Routing fails in the start, daijuing for a while to get a better position.\n");
+					daiju_mode(1);
+					send_info(INFO_STATE_DAIJUING);
+					printf("(Please retry after some time.)\n");
 				}
+
 			}
 			else if(ret == TCP_CR_CHARGE_MID)
 			{
+				max_speedlim=50;
 				read_charger_pos();
 				find_charger_state = 1;
 			}
@@ -1131,8 +1103,7 @@ void* main_thread()
 					}
 				}
 			}
-			else if(ret == TCP_CR_MODE_MID)	
-			{
+			else if(ret == TCP_CR_MODE_MID)			{
 				printf("Request for MODE %d\n", msg_cr_mode.mode);
 				switch(msg_cr_mode.mode)
 				{
@@ -1195,7 +1166,6 @@ void* main_thread()
 						do_follow_route = 0;
 						send_info(INFO_STATE_IDLE);
 						motors_on = 0;
-						release_motors();
 						mapping_on = 1;
 					} break;
 
@@ -1207,7 +1177,6 @@ void* main_thread()
 						send_info(INFO_STATE_IDLE);
 						do_follow_route = 0;
 						motors_on = 0;
-						release_motors();
 						mapping_on = 0;
 					} break;
 
@@ -1275,21 +1244,6 @@ void* main_thread()
 					printf("WARN: Illegal maintenance message magic number 0x%08x.\n", msg_cr_maintenance.magic);
 				}
 			}		
-			else if(ret == TCP_CR_SPEEDLIM_MID)
-			{
-				int new_lim = msg_cr_speedlim.speedlim_linear_fwd;
-				printf("INFO: Speedlim msg %d\n", new_lim);
-				if(new_lim < 1 || new_lim > MAX_CONFIGURABLE_SPEEDLIM)
-					max_speedlim = DEFAULT_SPEEDLIM;
-				else
-					max_speedlim = new_lim;
-
-				if(cur_speedlim > max_speedlim)
-				{
-					cur_speedlim = max_speedlim;
-					limit_speed(cur_speedlim);
-				}
-			}
 		}
 
 		if(FD_ISSET(tcp_listener_sock, &fds))
@@ -1306,26 +1260,6 @@ void* main_thread()
 //		}
 
 		static int micronavi_stop_flags_printed = 0;
-
-		if(cmd_state == TCP_CR_DEST_MID)
-		{
-			if(cur_xymove.remaining < 5)
-			{
-				if(tcp_client_sock >= 0)
-				{
-					msg_rc_movement_status.cur_ang = cur_ang>>16;
-					msg_rc_movement_status.cur_x = cur_x;
-					msg_rc_movement_status.cur_y = cur_y;
-					msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_SUCCESS;
-					msg_rc_movement_status.obstacle_flags = 0;
-					tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
-				}
-
-				cmd_state = 0;
-
-			}
-		}
-	
 
 		if(cur_xymove.micronavi_stop_flags)
 		{
@@ -1351,21 +1285,6 @@ void* main_thread()
 				}
 
 				printf("\n");
-
-				if(cmd_state == TCP_CR_DEST_MID)
-				{
-					if(tcp_client_sock >= 0)
-					{
-						msg_rc_movement_status.cur_ang = cur_ang>>16;
-						msg_rc_movement_status.cur_x = cur_x;
-						msg_rc_movement_status.cur_y = cur_y;
-						msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_STOPPED;
-						msg_rc_movement_status.obstacle_flags = cur_xymove.micronavi_stop_flags;
-						tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
-					}
-
-					cmd_state = 0;
-				}
 			}
 		}
 		else
@@ -1398,21 +1317,6 @@ void* main_thread()
 						}
 					}
 				}
-				if(cmd_state == TCP_CR_DEST_MID)
-				{
-					if(tcp_client_sock >= 0)
-					{
-						msg_rc_movement_status.cur_ang = cur_ang>>16;
-						msg_rc_movement_status.cur_x = cur_x;
-						msg_rc_movement_status.cur_y = cur_y;
-						msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_STOPPED_BY_FEEDBACK_MODULE;
-						msg_rc_movement_status.obstacle_flags = cur_xymove.feedback_stop_flags;
-						tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
-					}
-
-					cmd_state = 0;
-				}
-
 			}
 		}
 		else
@@ -1617,27 +1521,7 @@ void* main_thread()
 
 #endif
 
-#ifdef PULUTOF1
 
-#ifdef PULUTOF1_GIVE_RAWS
-
-		pulutof_frame_t* p_tof;
-		if( (p_tof = get_pulutof_frame()) )
-		{
-			if(tcp_client_sock >= 0)
-			{
-#ifdef PULUTOF_EXTRA
-				tcp_send_picture(p_tof->dbg_id, 2, 160, 60, p_tof->dbg);
-#endif
-				tcp_send_picture(100,           2, 160, 60, (uint8_t*)p_tof->depth);
-#ifdef PULUTOF_EXTRA
-				tcp_send_picture(110,           2, 160, 60, (uint8_t*)p_tof->uncorrected_depth);
-#endif
-			}
-
-		}
-
-#else
 		tof3d_scan_t *p_tof;
 		if( (p_tof = get_tof3d()) )
 		{
@@ -1647,14 +1531,10 @@ void* main_thread()
 				static int hmap_cnt = 0;
 				hmap_cnt++;
 
-				if(hmap_cnt >= 4)
+				if(hmap_cnt >= 1)
 				{
 					//printf("Send hmap\n");
-					tcp_send_hmap(TOF3D_HMAP_XSPOTS, TOF3D_HMAP_YSPOTS, p_tof->robot_pos.ang, p_tof->robot_pos.x, p_tof->robot_pos.y, TOF3D_HMAP_SPOT_SIZE, p_tof->objmap);
-
-					if(send_raw_tof >= 0 && send_raw_tof < 4)
-						tcp_send_picture(100, 2, 160, 60, (uint8_t*)p_tof->raw_depth);
-
+					tcp_send_hmap(TOF3D_HMAP_XSPOTS, TOF3D_HMAP_YSPOTS, cur_ang, cur_x, cur_y, TOF3D_HMAP_SPOT_SIZE, p_tof->objmap);
 					//printf("Done\n");
 					hmap_cnt = 0;
 				}
@@ -1704,8 +1584,7 @@ void* main_thread()
 			}
 
 		}
-#endif
-#endif
+
 
 
 
@@ -1721,12 +1600,6 @@ void* main_thread()
 				{
 					cur_speedlim++;
 					//printf("cur_speedlim++ to %d\n", cur_speedlim);
-					limit_speed(cur_speedlim);
-				}
-
-				if(cur_speedlim > max_speedlim)
-				{
-					cur_speedlim--;
 					limit_speed(cur_speedlim);
 				}
 			}
@@ -1788,7 +1661,6 @@ void* main_thread()
 						msg_rc_pos.ang = cur_ang>>16;
 						msg_rc_pos.x = cur_x;
 						msg_rc_pos.y = cur_y;
-						msg_rc_pos.cmd_state = cmd_state;
 						tcp_send_msg(&msgmeta_rc_pos, &msg_rc_pos);
 					}
 					curpos_send_cnt = 0;
@@ -1886,18 +1758,26 @@ void* main_thread()
 
 			}
 
-		}
-
-		static int keepalive_cnt = 0;
-		if(++keepalive_cnt > 500)
-		{
-			keepalive_cnt = 0;
 			if(motors_on)
 				send_keepalive();
 			else
 				release_motors();
 		}
 
+/*
+		pulutof_frame_t* p_tof;
+		if( (p_tof = get_pulutof_frame()) )
+		{
+			if(tcp_client_sock >= 0)
+			{
+				tcp_send_picture(p_tof->dbg_id, 2, 160, 60, p_tof->dbg);
+				tcp_send_picture(100,           2, 160, 60, (uint8_t*)p_tof->depth);
+				tcp_send_picture(110,           2, 160, 60, (uint8_t*)p_tof->uncorrected_depth);
+//				tcp_send_picture(101,           1, 160, 60, p_tof->ambient);
+			}
+
+		}
+*/
 
 		sonar_point_t* p_son;
 		if( (p_son = get_sonar()) )
@@ -1973,14 +1853,11 @@ int main(int argc, char** argv)
 		printf("ERROR: tof3d access thread creation, ret = %d\n", ret);
 		return -1;
 	}
-
-	#ifndef PULUTOF1_GIVE_RAWS
-		if( (ret = pthread_create(&thread_tof2, NULL, pulutof_processing_thread, NULL)) )
-		{
-			printf("ERROR: tof3d processing thread creation, ret = %d\n", ret);
-			return -1;
-		}
-	#endif
+	if( (ret = pthread_create(&thread_tof2, NULL, pulutof_processing_thread, NULL)) )
+	{
+		printf("ERROR: tof3d processing thread creation, ret = %d\n", ret);
+		return -1;
+	}
 #endif
 
 	pthread_join(thread_main, NULL);

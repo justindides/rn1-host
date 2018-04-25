@@ -116,6 +116,7 @@ void mm_from_unit_coords(int unit_x, int unit_y, int* mm_x, int* mm_y)
 	*mm_y = unit_y * MAP_UNIT_W;
 }
 
+// By sending the coord of a point (unit_x and y), it gives you the ID and the pageoffs of the map page the point is on.
 void page_coords_from_unit_coords(int unit_x, int unit_y, int* pageidx_x, int* pageidx_y, int* pageoffs_x, int* pageoffs_y)
 {
 	int page_x = unit_x / MAP_PAGE_W;
@@ -503,7 +504,6 @@ static int32_t score_quick_search_xy(int8_t *scoremap, int n_lidars, lidar_scan_
 	*best_dx = dx_start+dx_step*best_ix;
 	*best_dy = dy_start+dy_step*best_iy;
 
-	if(n_points < 10) return 0;
 	return (200*best_score)/n_points;
 }
 
@@ -541,7 +541,7 @@ static int do_mapping(world_t* w, int n_lidars, lidar_scan_t** lidar_list,
 		lidar_scan_t* lid = lidar_list[l];
 
 		// Rotate the point by da and then shift by dx, dy.
-		float ang = (float)da/((float)ANG_1_DEG*360.0)*2.0*M_PI;
+		float ang = (float)da/((float)ANG_1_DEG*360.0)*2.0*M_PI;  //rad
 
 		int robot_pre_x = lid->robot_pos.x - rotate_mid_x;
 		int robot_pre_y = lid->robot_pos.y - rotate_mid_y;
@@ -1041,28 +1041,6 @@ int do_map_lidars_new_quick(world_t* w, int n_lidars, lidar_scan_t** lidar_list,
 		return -1;
 	}
 
-	for(int i=0; i<n_lidars; i++)
-	{
-	// Unbelievable s**t, super ugly hack, find the actual culprit instead (lidar_list[6] was pointing to address 0x14, rarely, can't understand why)
-
-		lidar_scan_t* mem_begin = &lidars[0]; if(&significant_lidars[0] < mem_begin) mem_begin = &significant_lidars[0];
-		lidar_scan_t* mem_end = &lidars[LIDAR_RING_BUF_LEN-1]; if(&significant_lidars[SIGNIFICANT_LIDAR_RING_BUF_LEN-1] > mem_end) mem_end = &significant_lidars[SIGNIFICANT_LIDAR_RING_BUF_LEN-1];
-
-		if(lidar_list[i] == 0 || lidar_list[i] < mem_begin || lidar_list[i] > mem_end || lidar_list[i]->n_points > MAX_LIDAR_POINTS)
-		{
-			if(i == n_lidars-1)
-			{
-				printf("ERROR: lidar_list[%d] sanity check fail, skipping last lidar\n", i);
-				n_lidars--;
-			}
-			else
-			{
-				printf("ERROR: lidar_list[%d] sanity check fail on non-last lidar, not mapping\n", i);
-				return -1;
-			}
-		}
-	}
-
 
 	if(search_area_size > 0)
 	{
@@ -1316,19 +1294,18 @@ int map_3dtof(world_t* w, int n_tofs, tof3d_scan_t** tof_list, int32_t *mx, int3
 					case TOF3D_THRESHOLD    : maybes[tm_y*MAP_PAGE_W+tm_x]++; break;
 
 					case TOF3D_SMALL_ITEM   :
-					case TOF3D_BIG_ITEM     :
-					case TOF3D_LOW_CEILING  : items[tm_y*MAP_PAGE_W+tm_x]++; break;
+					case TOF3D_BIG_ITEM     : items[tm_y*MAP_PAGE_W+tm_x]++; break;
 
 					case TOF3D_WALL         : walls[tm_y*MAP_PAGE_W+tm_x]++; break;
 
-					case TOF3D_FLOOR        : seens[tm_y*MAP_PAGE_W+tm_x]++; break;
+					case TOF3D_FLOOR        : if(ix > 4) seens[tm_y*MAP_PAGE_W+tm_x]++; break; // don't remove obstacles right next to the robot
 					default: break;
 				}
 			}
 		}
 	}
 
-	if(out_of_area_ignores > 100)
+	if(out_of_area_ignores)
 		printf("Ignored %d far-away points not fitting to tempmap.\n", out_of_area_ignores);
 
 	// Copy tempmaps to actual map
@@ -1406,21 +1383,11 @@ int map_3dtof(world_t* w, int n_tofs, tof3d_scan_t** tof_list, int32_t *mx, int3
 			}
 			else if(seens[iy*MAP_PAGE_W+ix] >= seen_removal_limit && drops[iy*MAP_PAGE_W+ix] == 0 && items[iy*MAP_PAGE_W+ix] == 0 && walls[iy*MAP_PAGE_W+ix] == 0)
 			{
-				// Clear neighbors as well. But to save time/complexity, don't go over page borders.
-				for(int nx=-1; nx<=1; nx++)
-				{
-					for(int ny=-1; ny<=1; ny++)
-					{
-						int oxn = ox+nx; if(oxn < 0 || oxn >= MAP_PAGE_W) continue;
-						int oyn = oy+ny; if(oyn < 0 || oyn >= MAP_PAGE_W) continue;
-						if(w->pages[px][py]->units[oxn][oyn].result & (UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL)) w->changed[px][py] = 1;
-						w->pages[px][py]->units[oxn][oyn].result &= ~(UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL);
-						w->pages[px][py]->units[oxn][oyn].latest &= ~(UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL);
-						w->pages[px][py]->units[oxn][oyn].num_3d_obstacles = 0;
-						cnt_removal++;
-
-					}
-				}
+				if(w->pages[px][py]->units[ox][oy].result & (UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL)) w->changed[px][py] = 1;
+				w->pages[px][py]->units[ox][oy].result &= ~(UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL);
+				w->pages[px][py]->units[ox][oy].latest &= ~(UNIT_DROP | UNIT_ITEM | UNIT_3D_WALL);
+				w->pages[px][py]->units[ox][oy].num_3d_obstacles = 0;
+				cnt_removal++;
 			}
 
 			ox++;

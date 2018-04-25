@@ -99,6 +99,10 @@ float robot_shape_x_len;
 uint32_t robot_shapes[32][ROBOT_SHAPE_WINDOW];
 
 
+// This will check if a collision could happen if we go in a certain direction. X and Y are the coord of the robot.
+// Comparing the map around these coords to the coords of obstacles. It will return one if it is going to collide,
+// and 0 if not.
+
 static int check_hit(int x, int y, int direction)
 {
 //	printf("check_hit(%d, %d, %d)\n", x, y, direction);
@@ -134,6 +138,7 @@ static int check_hit(int x, int y, int direction)
 	return 0;
 }
 
+// Does the same has check_hit, but returns the amount (hit_cnt) of objects that could meet the robot if he goes toward the direction.
 static int check_hit_hitcnt(int x, int y, int direction)
 {
 //	printf("check_hit(%d, %d, %d)\n", x, y, direction);
@@ -173,6 +178,7 @@ static int check_hit_hitcnt(int x, int y, int direction)
 }
 
 
+// Check if it is possible for the robot to turn from a start angle, to an end angle without collision. Return 1 if it is possible, 0 if it is not.
 static int test_robot_turn(int x, int y, float start, float end)
 {
 	int cw = 0;
@@ -264,6 +270,10 @@ static int test_robot_turn_hitcnt(int x, int y, float start, float end)
 	return hitcnt;
 }
 
+// This will check if the robot would meet an obstacle on a straight line from a point p1 to a point p2. 
+// For this, he uses the function check it. 
+// If the line of sight is clear (no obstacle), it will return 1. If it is not, it will return 0.
+
 static int line_of_sight(route_xy_t p1, route_xy_t p2)
 {
 	int dx = p2.x - p1.x;
@@ -311,6 +321,7 @@ static int line_of_sight(route_xy_t p1, route_xy_t p2)
 	return 1;
 }
 
+// Does the same as line_of_sight but returns the amount of obstacle the robot would meet toward this destination.
 static int line_of_sight_hitcnt(route_xy_t p1, route_xy_t p2)
 {
 	int dx = p2.x - p1.x;
@@ -1576,8 +1587,11 @@ int check_direct_route_hitcnt(int32_t start_ang, int start_x, int start_y, int e
 	return hitcnt;
 }
 
-
-int check_direct_route_non_turning(int start_x, int start_y, int end_x, int end_y)
+// Check if it is possible to go from a point A to a point B in a straight line. Parameters are the coords of the 
+// points of the starting point and the ending point of the route. If it is possible to reach the point B without 
+// turning; then it returns 1. If not, it returns 0.
+int c
+heck_direct_route_non_turning(int start_x, int start_y, int end_x, int end_y)
 {
 	route_xy_t start = {start_x, start_y};
 	route_xy_t end = {end_x, end_y};

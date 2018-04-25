@@ -1,4 +1,3 @@
-//#define PULUTOF_EXTRA
 /*
 	PULUROBOT RN1-HOST Computer-on-RobotBoard main software
 
@@ -54,13 +53,11 @@ typedef struct __attribute__((packed))
 	uint16_t depth[TOF_XS*TOF_YS];
 //	uint8_t  ampl[EPC_XS*EPC_YS];
 //	uint8_t  ambient[EPC_XS*EPC_YS];
-#ifdef PULUTOF_EXTRA
+//	uint16_t uncorrected_depth[TOF_XS*TOF_YS];
 
-	uint16_t uncorrected_depth[TOF_XS*TOF_YS];
+//	uint8_t dbg_id;
+//	uint8_t dbg[2*TOF_XS*TOF_YS];
 
-	uint8_t dbg_id;
-	uint8_t dbg[2*TOF_XS*TOF_YS];
-#endif
 	uint16_t timestamps[24]; // 0.1ms unit timestamps of various steps for analyzing the timing of low-level processing
 	int32_t  dbg_i32[8];
 
@@ -95,9 +92,8 @@ void pulutof_cal_offset(uint8_t idx);
 */
 
 // Priority order: bigger number overrides smaller at same 2D spot
-#define TOF3D_WALL           8 
-#define TOF3D_BIG_ITEM       7 
-#define TOF3D_LOW_CEILING    6 
+#define TOF3D_WALL           7 
+#define TOF3D_BIG_ITEM       6 
 #define TOF3D_BIG_DROP       5
 #define TOF3D_SMALL_ITEM     4 
 #define TOF3D_SMALL_DROP     3
@@ -115,15 +111,12 @@ void pulutof_cal_offset(uint8_t idx);
 
 #define HMAP_BLOCK_MM 40
 
-extern volatile int send_raw_tof; // which sensor id to send as raw_depth, <0 = N/A
-
 typedef struct
 {
 	pos_t robot_pos;
 //	int n_points;
 //	xyz_t cloud[TOF_XS*TOF_YS];
 	int8_t objmap[TOF3D_HMAP_YSPOTS*TOF3D_HMAP_XSPOTS];
-	uint16_t raw_depth[160*60]; // for development purposes
 } tof3d_scan_t;
 
 tof3d_scan_t* get_tof3d();
