@@ -126,18 +126,7 @@ void send_info(info_state_t state)
 	if(tcp_client_sock >= 0) tcp_send_info_state(state);
 }
 
-/*
-* Calls the function wich send the tcp/ip state info 
-*
-* Input parameters:
-* info_state_t state : State of the tcp/ip communicaiton 
-* Input memory areas:
-* None
-* Output memory areas:
-* None
-* Return value:
-* 
-*/
+
 int32_t prev_search_dest_x, prev_search_dest_y;
 int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight)
 {
