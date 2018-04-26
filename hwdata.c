@@ -35,17 +35,17 @@
 #include "mapping.h"
 #include "datatypes.h"
 #include "uart.h"
+#include "hwdata.h"
 
 #include "../rn1-brain/comm.h" // For the convenient 7-bit data handling macros.
 #define I14x2_I16(msb,lsb) ((int16_t)( ( ((uint16_t)(msb)<<9) | ((uint16_t)(lsb)<<2) ) ))
 
 
-#define SIGNIFICANT_LIDAR_RING_BUF_LEN 32
-#define LIDAR_RING_BUF_LEN 16
 #define SONAR_RING_BUF_LEN 128
 
 extern double subsec_timestamp();
 
+extern int verbose_mode;
 
 int lidar_wr = 0;
 int lidar_rd = 0;
@@ -109,7 +109,7 @@ extern double robot_pos_timestamp;
 pthread_mutex_t cur_pos_mutex = PTHREAD_MUTEX_INITIALIZER;
 int update_robot_pos(int32_t ang, int32_t x, int32_t y)
 {
-	//printf("update_robot_pos(%d, %d, %d)\n", ang, x, y);
+	if(verbose_mode) printf("update_robot_pos(%d, %d, %d)\n", ang, x, y);
 	static int error_cnt = 0;
 	if(   x <= -1*(MAP_PAGE_W_MM*(MAP_W/2-1)) || x >= MAP_PAGE_W_MM*(MAP_W/2-1)
 	   || y <= -1*(MAP_PAGE_W_MM*(MAP_W/2-1)) || y >= MAP_PAGE_W_MM*(MAP_W/2-1) )
@@ -136,14 +136,35 @@ int update_robot_pos(int32_t ang, int32_t x, int32_t y)
 	cur_pos_invalid_for_3dtof = 0;
 	pthread_mutex_unlock(&cur_pos_mutex);
 
-	return 0;
-}
 
-void prevent_3dtoffing()
-{
-	pthread_mutex_lock(&cur_pos_mutex);
-	cur_pos_invalid_for_3dtof = 1;
-	pthread_mutex_unlock(&cur_pos_mutex);
+#ifdef MOTCON_PID_EXPERIMENT
+
+	static FILE* coord_log;
+	static int coord_log_inited = 0;
+
+	if(!coord_log_inited)
+	{
+		coord_log = fopen("coord_log.csv", "w");
+		if(!coord_log)
+		{
+			printf("ERROR: Opening coord_log.csv for write failed\n");
+		}
+		else
+		{
+			coord_log_inited = 1;
+			fprintf(coord_log, "ang_deg,x_mm,y_mm\n");
+		}
+	}
+
+	if(coord_log_inited)
+	{
+		fprintf(coord_log, "%.2f, %d, %d\n", ANG32TOFDEG(ang), x, y);
+		fflush(coord_log);
+	}
+
+#endif
+
+	return 0;
 }
 
 #define sq(x) ((x)*(x))
@@ -181,6 +202,8 @@ typedef struct __attribute__((packed))
 
 dbg_teleportation_bug_data_t buglog;
 dbg_teleportation_extra_t bugextra;
+
+chafind_results_t chafind_results;
 
 int parse_uart_msg(uint8_t* buf, int msgid, int len)
 {
@@ -275,6 +298,9 @@ int parse_uart_msg(uint8_t* buf, int msgid, int len)
 				lid->scan[i].valid = 1;
 			}
 
+			if(verbose_mode) printf("INFO: Got lidar scan, n_points=%d, robot_pos=%d,%d\n", lid->n_points, lid->robot_pos.x, lid->robot_pos.y);
+
+
 			if(is_significant)
 			{
 				significant_lidar_wr++; if(significant_lidar_wr >= SIGNIFICANT_LIDAR_RING_BUF_LEN) significant_lidar_wr = 0;
@@ -294,7 +320,7 @@ int parse_uart_msg(uint8_t* buf, int msgid, int len)
 			sonars[sonar_wr].z = (int16_t)I16FROMBUFLE(buf, 8);
 			sonars[sonar_wr].c = buf[10];
 
-			//printf("SONAR: x=%d   y=%d   z=%d   c=%d\n", sonars[sonar_wr].x, sonars[sonar_wr].y, sonars[sonar_wr].z, sonars[sonar_wr].c);
+			if(verbose_mode) printf("INFO: Got SONAR: x=%d   y=%d   z=%d   c=%d\n", sonars[sonar_wr].x, sonars[sonar_wr].y, sonars[sonar_wr].z, sonars[sonar_wr].c);
 
 			sonar_wr++; if(sonar_wr >= SONAR_RING_BUF_LEN) sonar_wr = 0;
 		}
@@ -322,6 +348,8 @@ int parse_uart_msg(uint8_t* buf, int msgid, int len)
 			pwr_status.bat_mv = I7I7_U16_lossy(buf[1], buf[2]);
 			pwr_status.bat_percentage = buf[3];
 			pwr_status.cha_mv = I7I7_U16_lossy(buf[4], buf[5]);
+
+			if(verbose_mode) printf("Got pwr status: %d mv (%d%%), cha input: %d mv, cha?:%d, done?:%d\n", pwr_status.bat_mv, pwr_status.bat_percentage, pwr_status.cha_mv, pwr_status.charging, pwr_status.charged);
 		}
 		break;
 
@@ -332,7 +360,7 @@ int parse_uart_msg(uint8_t* buf, int msgid, int len)
 			compass_round_active = buf[0];
 			cur_compass_ang = I7I7_U16_lossy(buf[1], buf[2])<<16;
 
-//			printf("cur_compass_ang = %6.1fdeg  %s\n", ANG32TOFDEG(cur_compass_ang), compass_round_active?"CALIBRATING":"");
+//			if(verbose_mode) printf("cur_compass_ang = %6.1fdeg  %s\n", ANG32TOFDEG(cur_compass_ang), compass_round_active?"CALIBRATING":"");
 		}
 		break;
 
@@ -390,6 +418,20 @@ int parse_uart_msg(uint8_t* buf, int msgid, int len)
 		}
 		break;
 
+		case 0x95: // chafind results
+		{
+			memcpy(&chafind_results, buf, sizeof chafind_results);
+			printf("INFO: Got charger mount results:\n");
+			printf("INFO:    first movement needed = %d mm\n", chafind_results.first_movement_needed);
+			printf("INFO:    positioning: angular tune passes needed = %d\n", chafind_results.turning_passes_needed);
+			printf("INFO:    positioning: sideway repositioning passes needed = %d\n", chafind_results.vexling_passes_needed);
+			printf("INFO:    positioning result: %s (code %d)\n", chafind_results.accepted_pos?"SUCCESS": "FAILURE", chafind_results.accepted_pos);
+			printf("INFO:    distance before push: %d mm\n", chafind_results.dist_before_push);
+			printf("INFO:    result: %s (code %d)\n", chafind_results.result==100?"SUCCESS":"FAILURE", chafind_results.result);
+
+		}
+		break;
+
 		default:
 		break;
 	}
@@ -419,7 +461,7 @@ void move_to(int32_t x, int32_t y, int8_t backmode, int id, int speedlimit, int 
 		id = 0;
 	}
 
-	printf("Move(%d,%d),back=%d,id=%d\n", x,y,backmode,id);
+	printf("Move(%d,%d),back=%d,id=%d, speedlim=%d\n", x,y,backmode,id, speedlimit);
 
 	buf[0] = 0x82;
 	buf[1] = I32_I7_4(x);
@@ -442,7 +484,7 @@ void move_to(int32_t x, int32_t y, int8_t backmode, int id, int speedlimit, int 
 
 // This moves the robot of a certain angle (ang_abs) in degrees and makes it go forward (fwd_rel > 0) or backward (<0). The value of fwd_rel defines
 // the distance the robot will ride forward or backward, it seems this distance is in millimeters. Also define a speed limit and the accuracy of the turn. 
-void turn_and_go_abs_rel(int32_t ang_abs, int fwd_rel, int speedlimit, int accurate_turn) 
+void turn_and_go_abs_rel(int32_t ang_abs, int fwd_rel, int speedlimit, int accurate_turn)
 {
 	uint8_t buf[8];
 

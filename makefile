@@ -1,17 +1,19 @@
 MODEL=DELIVERY_BOY
 
-CFLAGS = -D$(MODEL) -DMAP_DIR=\"/home/hrst/rn1-host\" -DSERIAL_DEV=\"/dev/serial0\" -Wall -Winline -std=c99 -g
+CFLAGS = -D$(MODEL) -DMAP_DIR=\"/home/pulu/rn1-host\" -DSERIAL_DEV=\"/dev/serial0\" -Wall -Winline -std=c99 -g
 LDFLAGS = 
 
 DEPS = mapping.h uart.h map_memdisk.h datatypes.h hwdata.h tcp_comm.h tcp_parser.h routing.h map_opers.h pulutof.h
-OBJ = rn1host.o mapping.o map_memdisk.o uart.o hwdata.o tcp_comm.o tcp_parser.o routing.o map_opers.o pulutof.o
+OBJ = rn1host.o mapping.o map_memdisk.o uart.o hwdata.o tcp_comm.o tcp_parser.o routing.o map_opers.o
+#pulutof.o
 
 all: rn1host
 
 #CFLAGS += -DSIMULATE_SERIAL
-CFLAGS += -DPULUTOF1
-CFLAGS += -DPULUTOF_ROBOT_SER_1_TO_4
+#CFLAGS += -DPULUTOF1
+#CFLAGS += -DPULUTOF_ROBOT_SER_1_TO_4
 #CFLAGS += -DPULUTOF_ROBOT_SER_5_UP
+CFLAGS += -DMOTCON_PID_EXPERIMENT
 
 %.o: %.c $(DEPS)
 	gcc -c -o $@ $< $(CFLAGS) -pthread

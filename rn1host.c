@@ -19,6 +19,48 @@
 
 */
 
+/*
+
+	Currently, we recommend the following procedure to localize on existing maps:
+
+	A) If possible, it's always most intuitive to map the new area by first time booting the robot
+	in a logical position and angle: for example, (almost) mounted in the charger is a good place.
+	If you do this to an accuracy of +/- 40cm and about +/- 4 degrees, you never need to do anything,
+	localization succeeds to the existing map, since robot boots to the same zero coordinate with enough
+	accuracy for the "normal" SLAM correction.
+
+
+	B) If you want to localize to another place than the origin in an existing map, or to a more uncertain position,
+	   please do the following:
+
+	1) As the very first step, send TCP_CR_STATEVECT_MID: disable mapping_*, enable loca_*, so that the map isn't messed up
+	   before succesful localization happens.
+
+	2) If necessary, also set localize_with_big_search_area=1 or =2 in the statevect.
+
+	3) Use TCP_CR_SETPOS_MID to send your estimate of the robot coordinates, with the following precision:
+		+/- 4 degree angle,  +/-  400mm x&y, if localize_with_big_search_area state is 0 (normal operation)
+		+/- 45 degree angle, +/- 2000mm x&y, if localize_with_big_search_area state is 1
+		    Any angle,       +/- 2400mm x&y, if localize_with_big_search_area state is 2
+
+	4) Instruct manual move(s) towards any desired direction where you can/want go to. If localize_with_big_search_area
+	   state is set, more than normal number of lidar scans will be accumulated before the localization happens -
+	   this typically means you need to move about 2-3 meters. Similarly, the localization with big search area
+	   will take up to 20-30 seconds typically, or even minutes when set to 2.
+
+	5) TCP_RC_LOCALIZATION_RESULT_MID is sent. If the localization results in high enough score,
+	   localize_with_big_search_area is automatically unset. If the score is low, it remains set, until localization
+	   is good. If you face a problem that you can't get high enough score, we advice you localize around a place with enough
+	   visual clues, and make sure the map built earlier actually shows them (enough time to build a detailed, strong map).
+
+	6) You can send TCP_CR_STATEVECT_MID with mapping_* turned on as well. These are not turned on automatically.
+
+
+
+*/
+
+
+//#define PULUTOF1_GIVE_RAWS
 
 #define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
@@ -51,9 +93,32 @@
 
 #include "mcu_micronavi_docu.c"
 
+#define DEFAULT_SPEEDLIM 45
+#define MAX_CONFIGURABLE_SPEEDLIM 70
 
-int max_speedlim = 45;
-int cur_speedlim = 45;
+volatile int verbose_mode = 0;
+volatile int send_raw_tof = -1;
+volatile int send_pointcloud = 0; // 0 = off, 1 = relative to robot, 2 = relative to actual world coords
+
+int max_speedlim = DEFAULT_SPEEDLIM;
+int cur_speedlim = DEFAULT_SPEEDLIM;
+
+
+state_vect_t state_vect =
+{
+	.v = {
+	.loca_2d = 1,
+	.loca_3d = 1,
+	.mapping_2d = 1,
+	.mapping_3d = 1,
+	.mapping_collisions = 1,
+	.keep_position = 1,
+	.command_source = USER_IN_COMMAND,
+	.localize_with_big_search_area = 0
+	}
+};
+
+#define SPEED(x_) do{ cur_speedlim = ((x_)>max_speedlim)?(max_speedlim):(x_); } while(0);
 
 double subsec_timestamp()
 {
@@ -63,17 +128,16 @@ double subsec_timestamp()
 	return (double)spec.tv_sec + (double)spec.tv_nsec/1.0e9;
 }
 
-int mapping_on = 1;
-int live_obstacle_checking_on = 1;
+int live_obstacle_checking_on = 1; // only temporarily disabled by charger mounting code.
 int pos_corr_id = 42;
 #define INCR_POS_CORR_ID() {pos_corr_id++; if(pos_corr_id > 99) pos_corr_id = 0;}
 
 
 int map_significance_mode = MAP_SEMISIGNIFICANT_IMGS | MAP_SIGNIFICANT_IMGS;
 
-int motors_on = 1;
-
 uint32_t robot_id = 0xacdcabba; // Hopefully unique identifier for the robot.
+
+int cmd_state;
 
 extern world_t world;
 #define BUFLEN 2048
@@ -106,7 +170,7 @@ int good_time_for_lidar_mapping = 0;
 
 #define sq(x) ((x)*(x))
 
-#define NUM_LATEST_LIDARS_FOR_ROUTING_START 7
+#define NUM_LATEST_LIDARS_FOR_ROUTING_START 4
 lidar_scan_t* lidars_to_map_at_routing_start[NUM_LATEST_LIDARS_FOR_ROUTING_START];
 
 /**
@@ -126,7 +190,6 @@ void send_info(info_state_t state)
 	if(tcp_client_sock >= 0) tcp_send_info_state(state);
 }
 
-
 int32_t prev_search_dest_x, prev_search_dest_y;
 int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight)
 {
@@ -140,7 +203,7 @@ int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight
 		int32_t da, dx, dy;
 		map_lidars(&world, NUM_LATEST_LIDARS_FOR_ROUTING_START, lidars_to_map_at_routing_start, &da, &dx, &dy);
 		INCR_POS_CORR_ID();
-		correct_robot_pos(da, dx, dy, pos_corr_id);
+		correct_robot_pos(da/2, dx/2, dy/2, pos_corr_id);
 	}
 
 	route_unit_t *some_route = NULL;
@@ -181,6 +244,7 @@ int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight
 
 	the_route[len-1].take_next_early = 20;
 
+	msg_rc_route_status.num_reroutes++;
 
 	tcp_send_route(cur_x, cur_y, &some_route);
 
@@ -204,6 +268,23 @@ int run_search(int32_t dest_x, int32_t dest_y, int dont_map_lidars, int no_tight
 
 	return ret;
 
+}
+
+void send_route_end_status(uint8_t reason)
+{
+	if(cmd_state == TCP_CR_ROUTE_MID)
+	{
+		if(tcp_client_sock >= 0)
+		{
+			msg_rc_route_status.cur_ang = cur_ang>>16;
+			msg_rc_route_status.cur_x = cur_x;
+			msg_rc_route_status.cur_y = cur_y;
+			msg_rc_route_status.status = reason;
+			tcp_send_msg(&msgmeta_rc_route_status, &msg_rc_route_status);
+		}
+
+		cmd_state = 0;
+	}
 }
 
 int rerun_search()
@@ -296,7 +377,7 @@ void do_live_obstacle_checking()
 
 				if( (abs(side_drifts[best_drift_idx]) < 50) || ( abs(side_drifts[best_drift_idx]) < 100 && drift_angles[best_angle_idx] < M_PI/13.0))
 				{
-					cur_speedlim = 18;
+					SPEED(18);
 					limit_speed(cur_speedlim);
 //					printf("!!!!!!!!!!   Steering is almost needed (not performed) to maintain line-of-sight, hitcnt now = %d, optimum drift = %.1f degs, %d mm (hitcnt=%d), cur(%d,%d) to(%d,%d)\n",
 //						hitcnt, RADTODEG(drift_angles[best_angle_idx]), side_drifts[best_drift_idx], best_hitcnt, cur_x, cur_y, best_new_x, best_new_y);
@@ -325,13 +406,13 @@ void do_live_obstacle_checking()
 				if(hitcnt < 3)
 				{
 //					printf("!!!!!!!!!!!  Direct line-of-sight to the next point has 1..2 obstacles, slowing down.\n");
-					cur_speedlim = 18;
+					SPEED(18);
 					limit_speed(cur_speedlim);
 				}
 				else
 				{
 //					printf("Direct line-of-sight to the next point has disappeared! Trying to solve.\n");
-					cur_speedlim = 18;
+					SPEED(18);
 					limit_speed(cur_speedlim);
 					stop_movement();
 					lookaround_creep_reroute = 1;
@@ -370,7 +451,7 @@ void route_fsm()
 	static double timestamp;
 	static int creep_cnt;
 
-	if(lookaround_creep_reroute)  
+	if(lookaround_creep_reroute)
 	{
 		if(check_direct_route_non_turning_mm(cur_x, cur_y, the_route[route_pos].x, the_route[route_pos].y))
 		{// If there's a direct route without the need to turn, use it
@@ -431,7 +512,7 @@ void route_fsm()
 				lookaround_creep_reroute++;  // goes to the next step
 			}
 		}
-	}	
+	}
 	else if(lookaround_creep_reroute == 3)
 	{
 		double stamp;
@@ -518,6 +599,7 @@ void route_fsm()
 			}
 			else		// If the destination angle is not reachable, we'll have to reroute. If the reroute fails => Daiju mode on, then get to step 8
 			{
+				int reret;
 				printf("Can't turn towards the dest, rerouting.\n");
 				if(rerun_search() == 1)
 				{
@@ -578,6 +660,7 @@ void route_fsm()
 				else	// If a route has been found, stop the procedure.
 				{
 					printf("Routing succeeded, or failed later. Stopping lookaround, creep & reroute procedure.\n");
+					if(reret != 0) send_route_end_status(reret);
 					lookaround_creep_reroute = 0;
 				}
 
@@ -603,6 +686,7 @@ void route_fsm()
 			else
 			{
 				printf("Routing succeeded, or failed later. Stopping lookaround, creep & reroute procedure.\n");
+				if(reret != 0) send_route_end_status(reret);
 				lookaround_creep_reroute = 0;
 			}
 
@@ -672,6 +756,7 @@ void route_fsm()
 					printf("Maneuver done, redo the waypoint, id=%d!\n", (id_cnt<<4) | ((route_pos)&0b1111));
 					move_to(the_route[route_pos].x, the_route[route_pos].y, the_route[route_pos].backmode, (id_cnt<<4) | ((route_pos)&0b1111), cur_speedlim, 0);
 					send_info(the_route[route_pos].backmode?INFO_STATE_REV:INFO_STATE_FWD);
+
 				}
 			}
 			else
@@ -715,6 +800,7 @@ void route_fsm()
 						micronavi_stops = 0;
 						do_follow_route = 0;
 						route_finished_or_notfound = 1;
+						send_route_end_status(TCP_RC_ROUTE_STATUS_SUCCESS);
 					}
 				}
 				else if(live_obstacle_checking_on)
@@ -812,6 +898,32 @@ void read_charger_pos()
 }
 
 
+void save_pointcloud(int n_points, xyz_t* cloud)
+{
+	static int pc_cnt = 0;
+	char fname[256];
+	snprintf(fname, 255, "cloud%05d.xyz", pc_cnt);
+	printf("Saving pointcloud with %d samples to file %s.\n", n_points, fname);
+	FILE* pc_csv = fopen(fname, "w");
+	if(!pc_csv)
+	{
+		printf("Error opening file for write.\n");
+	}
+	else
+	{
+		for(int i=0; i < n_points; i++)
+		{
+			fprintf(pc_csv, "%d %d %d\n",cloud[i].x, -1*cloud[i].y, cloud[i].z);
+		}
+		fclose(pc_csv);
+	}
+
+	pc_cnt++;
+	if(pc_cnt > 99999) pc_cnt = 0;
+}
+
+
+
 int cal_x_d_offset = 0;
 int cal_y_d_offset = 0;
 float cal_x_offset = 40.0;
@@ -860,8 +972,9 @@ void* main_thread()
 	set_hw_obstacle_avoidance_margin(0);
 
 	double chafind_timestamp = 0.0;
-	int lidar_ignore_over = 0;		// End init variable
-	while(1)	// Main Loop
+	int lidar_ignore_over = 0;
+	int flush_3dtof = 0;
+	while(1)
 	{
 		// Calculate fd_set size (biggest fd+1)
 		int fds_size = 	// ?
@@ -894,11 +1007,13 @@ void* main_thread()
 			return NULL;
 		}
 
+#ifdef MOTCON_PID_EXPERIMENT
 		static uint8_t pid_i_max = 30;
 		static uint8_t pid_feedfwd = 30;
-		static uint8_t pid_p = 100;
-		static uint8_t pid_i = 20;
-		static uint8_t pid_d = 20;
+		static uint8_t pid_p = 80;
+		static uint8_t pid_i = 80;
+		static uint8_t pid_d = 50;
+#endif
 
 		if(FD_ISSET(STDIN_FILENO, &fds))
 		{
@@ -913,7 +1028,7 @@ void* main_thread()
 				retval = 5;
 				break;
 			}
-/*
+
 			if(cmd == 'S')
 			{
 				save_robot_pos();
@@ -922,7 +1037,7 @@ void* main_thread()
 			{
 				retrieve_robot_pos();
 			}
-*/
+
 /*			if(cmd == 'c')
 			{
 				printf("Starting automapping from compass round.\n");
@@ -944,23 +1059,10 @@ void* main_thread()
 			{
 				set_robot_pos(0,0,0);
 			}
-			if(cmd == 'm')
-			{
-				if(mapping_on)
-				{
-					mapping_on = 0;
-					printf("Turned mapping off.\n");
-				}
-				else
-				{
-					mapping_on = 1;
-					printf("Turned mapping on.\n");
-				}
-			}
 			if(cmd == 'M')
 			{
-				massive_search_area();
 				printf("Requesting massive search.\n");
+				state_vect.v.localize_with_big_search_area = 2;
 			}
 			if(cmd == 'L')
 			{
@@ -975,17 +1077,24 @@ void* main_thread()
 			}
 			if(cmd == 'v')
 			{
-				if(motors_on)
+				if(state_vect.v.keep_position)
 				{
-					motors_on = 0;
+					state_vect.v.keep_position = 0;
 					printf("Robot is free to move manually.\n");
 				}
 				else
 				{
-					motors_on = 1;
+					state_vect.v.keep_position = 1;
 					printf("Robot motors enabled again.\n");
 				}
 			}
+
+			if(cmd == 'V')
+			{
+				verbose_mode = verbose_mode?0:1;
+			}
+
+#ifdef PULUTOF1
 			if(cmd == 'z')
 			{
 				pulutof_decr_dbg();
@@ -994,12 +1103,42 @@ void* main_thread()
 			{
 				pulutof_incr_dbg();
 			}
+			if(cmd == 'Z')
+			{
+				if(send_raw_tof >= 0) send_raw_tof--;
+				printf("Sending raw tof from sensor %d\n", send_raw_tof);
+			}
+			if(cmd == 'X')
+			{
+				if(send_raw_tof < 3) send_raw_tof++;
+				printf("Sending raw tof from sensor %d\n", send_raw_tof);
+			}
 			if(cmd >= '1' && cmd <= '4')
 			{
 				pulutof_cal_offset(cmd-'1');
 			}
+			if(cmd == 'p')
+			{
+				if(send_pointcloud == 0)
+				{
+					printf("INFO: Will send pointclouds relative to robot origin\n");
+					send_pointcloud = 1;
+				}
+				else if(send_pointcloud == 1)
+				{
+					printf("INFO: Will send pointclouds relative to world origin\n");
+					send_pointcloud = 2;
+				}
+				else
+				{
+					printf("INFO: Will stop sending pointclouds\n");
+					send_pointcloud = 0;
+				}
+			}
+#endif
 
-/*			if(cmd >= '1' && cmd <= '9')
+#if 0
+			if(cmd >= '1' && cmd <= '9')
 			{
 				uint8_t bufings[3];
 				bufings[0] = 0xd0 + cmd-'0';
@@ -1008,6 +1147,9 @@ void* main_thread()
 				printf("Sending dev msg: %x\n", bufings[0]);
 				send_uart(bufings, 3);				
 			}
+#endif
+
+#ifdef MOTCON_PID_EXPERIMENT
 			if(cmd == 'A') {int tmp = (int)pid_i_max*5/4; if(tmp>255) tmp=255; pid_i_max=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'a') {int tmp = (int)pid_i_max*3/4; if(tmp<4) tmp=4;     pid_i_max=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'S') {int tmp = (int)pid_feedfwd*5/4; if(tmp>255) tmp=255; pid_feedfwd=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
@@ -1020,7 +1162,7 @@ void* main_thread()
 			if(cmd == 'g') {int tmp = (int)pid_d*3/4; if(tmp<4) tmp=4;     pid_d=tmp; send_motcon_pid(pid_i_max, pid_feedfwd, pid_p, pid_i, pid_d);}
 			if(cmd == 'z') {turn_and_go_rel_rel(0, 2000, 25, 1);}
 			if(cmd == 'Z') {turn_and_go_rel_rel(0, -2000, 25, 1);}
-*/
+#endif
 		}
 
 #ifndef SIMULATE_SERIAL
@@ -1033,20 +1175,31 @@ void* main_thread()
 		if(tcp_client_sock >= 0 && FD_ISSET(tcp_client_sock, &fds))
 		{
 			int ret = handle_tcp_client();
+			cmd_state = ret;
 			if(ret == TCP_CR_DEST_MID)
 			{
-				motors_on = 1;
+				state_vect.v.keep_position = 1;
 				daiju_mode(0);
-				max_speedlim=40;
+
+				msg_rc_movement_status.start_ang = cur_ang>>16;
+				msg_rc_movement_status.start_x = cur_x;
+				msg_rc_movement_status.start_y = cur_y;
+
+				msg_rc_movement_status.requested_x = msg_cr_dest.x;
+				msg_rc_movement_status.requested_y = msg_cr_dest.y;
+				msg_rc_movement_status.requested_backmode = msg_cr_dest.backmode;
+
+				cur_xymove.remaining = 999999; // invalidate
 
 				printf("  ---> DEST params: X=%d Y=%d backmode=0x%02x\n", msg_cr_dest.x, msg_cr_dest.y, msg_cr_dest.backmode);
-				if(msg_cr_dest.backmode & 0b1000) // Pose
+				if(msg_cr_dest.backmode & 0b1000) // Rotate pose
 				{
 					float ang = atan2(msg_cr_dest.y-cur_y, msg_cr_dest.x-cur_x);
 					turn_and_go_abs_rel(RADTOANG32(ang), 0, cur_speedlim, 1);
 				}
 				else
 					move_to(msg_cr_dest.x, msg_cr_dest.y, msg_cr_dest.backmode, 0, cur_speedlim, 1);
+
 				find_charger_state = 0;
 				lookaround_creep_reroute = 0;
 				do_follow_route = 0;
@@ -1055,24 +1208,29 @@ void* main_thread()
 			}
 			else if(ret == TCP_CR_ROUTE_MID)
 			{
+
 				printf("  ---> ROUTE params: X=%d Y=%d dummy=%d\n", msg_cr_route.x, msg_cr_route.y, msg_cr_route.dummy);
 
-				motors_on = 1;
+				msg_rc_route_status.start_ang = cur_ang>>16;
+				msg_rc_route_status.start_x = cur_x;
+				msg_rc_route_status.start_y = cur_y;
+
+				msg_rc_route_status.requested_x = msg_cr_route.x;
+				msg_rc_route_status.requested_y = msg_cr_route.y;
+				msg_rc_route_status.status = TCP_RC_ROUTE_STATUS_UNDEFINED;
+				msg_rc_route_status.num_reroutes = -1;
+
+				state_vect.v.keep_position = 1;
 				daiju_mode(0);
 				find_charger_state = 0;
-				max_speedlim=50;
-				if(run_search(msg_cr_route.x, msg_cr_route.y, 0, 1) == 1)
+				int ret;
+				if((ret = run_search(msg_cr_route.x, msg_cr_route.y, 0, 1)) != 0)
 				{
-					printf("Routing fails in the start, daijuing for a while to get a better position.\n");
-					daiju_mode(1);
-					send_info(INFO_STATE_DAIJUING);
-					printf("(Please retry after some time.)\n");
+					send_route_end_status(ret);
 				}
-
 			}
 			else if(ret == TCP_CR_CHARGE_MID)
 			{
-				max_speedlim=50;
 				read_charger_pos();
 				find_charger_state = 1;
 			}
@@ -1092,47 +1250,48 @@ void* main_thread()
 					}
 				}
 			}
-			else if(ret == TCP_CR_MODE_MID)			{
+			else if(ret == TCP_CR_MODE_MID)	// Most mode messages deprecated, here for backward-compatibility, will be removed soon.
+			{
 				printf("Request for MODE %d\n", msg_cr_mode.mode);
 				switch(msg_cr_mode.mode)
 				{
 					case 0:
 					{
-						motors_on = 1;
+						state_vect.v.keep_position = 1;
 						daiju_mode(0);
 						stop_automapping();
-						mapping_on = 0;
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 0;
 					} break;
 
 					case 1:
 					{
-						motors_on = 1;
+						state_vect.v.keep_position = 1;
 						daiju_mode(0);
 						stop_automapping();
 						find_charger_state = 0;
 						lookaround_creep_reroute = 0;
 						do_follow_route = 0;
 						send_info(INFO_STATE_IDLE);
-						mapping_on = 1;
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
 
 					} break;
 
 					case 2:
 					{
-						motors_on = 1;
+						state_vect.v.keep_position = 1;
 						daiju_mode(0);
 						routing_set_world(&world);
 						start_automapping_skip_compass();
-						mapping_on = 1;
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
 					} break;
 
 					case 3:
 					{
-						motors_on = 1;
+						state_vect.v.keep_position = 1;
 						daiju_mode(0);
 						routing_set_world(&world);
 						start_automapping_from_compass();
-						mapping_on = 1;
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
 					} break;
 
 					case 4:
@@ -1141,10 +1300,10 @@ void* main_thread()
 						find_charger_state = 0;
 						lookaround_creep_reroute = 0;
 						do_follow_route = 0;
-						motors_on = 1;
+						state_vect.v.keep_position = 1;
 						send_info(INFO_STATE_DAIJUING);
 						daiju_mode(1);
-						mapping_on = 0;
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 0;
 					} break;
 
 					case 5:
@@ -1154,8 +1313,9 @@ void* main_thread()
 						lookaround_creep_reroute = 0;
 						do_follow_route = 0;
 						send_info(INFO_STATE_IDLE);
-						motors_on = 0;
-						mapping_on = 1;
+						state_vect.v.keep_position = 0;
+						release_motors();
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
 					} break;
 
 					case 6:
@@ -1165,8 +1325,9 @@ void* main_thread()
 						lookaround_creep_reroute = 0;
 						send_info(INFO_STATE_IDLE);
 						do_follow_route = 0;
-						motors_on = 0;
-						mapping_on = 0;
+						state_vect.v.keep_position = 0;
+						release_motors();
+						state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 0;
 					} break;
 
 					case 7:
@@ -1201,7 +1362,7 @@ void* main_thread()
 				#define MANU_RIGHT 13
 				stop_automapping();
 				daiju_mode(0);
-				motors_on = 1;
+				state_vect.v.keep_position = 1;
 				printf("Manual OP %d\n", msg_cr_manu.op);
 				switch(msg_cr_manu.op)
 				{
@@ -1233,6 +1394,37 @@ void* main_thread()
 					printf("WARN: Illegal maintenance message magic number 0x%08x.\n", msg_cr_maintenance.magic);
 				}
 			}		
+			else if(ret == TCP_CR_SPEEDLIM_MID)
+			{
+				int new_lim = msg_cr_speedlim.speedlim_linear_fwd;
+				printf("INFO: Speedlim msg %d\n", new_lim);
+				if(new_lim < 1 || new_lim > MAX_CONFIGURABLE_SPEEDLIM)
+					max_speedlim = DEFAULT_SPEEDLIM;
+				else
+					max_speedlim = new_lim;
+
+				if(cur_speedlim > max_speedlim)
+				{
+					cur_speedlim = max_speedlim;
+					limit_speed(cur_speedlim);
+				}
+			}
+			else if(ret == TCP_CR_STATEVECT_MID)
+			{
+				tcp_send_statevect();
+			}
+			else if(ret == TCP_CR_SETPOS_MID)
+			{
+				set_robot_pos(msg_cr_setpos.ang<<16, msg_cr_setpos.x, msg_cr_setpos.y);
+
+				INCR_POS_CORR_ID();
+				correct_robot_pos(0, 0, 0, pos_corr_id); // forces new LIDAR ID, so that correct amount of images (on old coords) are ignored
+
+#ifdef PULUTOF1
+				while(get_tof3d()); // flush 3DTOF queue
+#endif
+				flush_3dtof = 2; // Flush two extra scans
+			}
 		}
 
 		if(FD_ISSET(tcp_listener_sock, &fds))
@@ -1249,6 +1441,26 @@ void* main_thread()
 //		}
 
 		static int micronavi_stop_flags_printed = 0;
+
+		if(cmd_state == TCP_CR_DEST_MID)
+		{
+			if(cur_xymove.remaining < 5)
+			{
+				if(tcp_client_sock >= 0)
+				{
+					msg_rc_movement_status.cur_ang = cur_ang>>16;
+					msg_rc_movement_status.cur_x = cur_x;
+					msg_rc_movement_status.cur_y = cur_y;
+					msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_SUCCESS;
+					msg_rc_movement_status.obstacle_flags = 0;
+					tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
+				}
+
+				cmd_state = 0;
+
+			}
+		}
+	
 
 		if(cur_xymove.micronavi_stop_flags)
 		{
@@ -1274,6 +1486,21 @@ void* main_thread()
 				}
 
 				printf("\n");
+
+				if(cmd_state == TCP_CR_DEST_MID)
+				{
+					if(tcp_client_sock >= 0)
+					{
+						msg_rc_movement_status.cur_ang = cur_ang>>16;
+						msg_rc_movement_status.cur_x = cur_x;
+						msg_rc_movement_status.cur_y = cur_y;
+						msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_STOPPED;
+						msg_rc_movement_status.obstacle_flags = cur_xymove.micronavi_stop_flags;
+						tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
+					}
+
+					cmd_state = 0;
+				}
 			}
 		}
 		else
@@ -1288,11 +1515,11 @@ void* main_thread()
 				feedback_stop_flags_processed = 1;
 				int stop_reason = cur_xymove.feedback_stop_flags;
 				printf("Feedback module reported: %s\n", MCU_FEEDBACK_COLLISION_NAMES[stop_reason]);
-				if(mapping_on)
+				if(state_vect.v.mapping_collisions)
 				{
 					map_collision_obstacle(&world, cur_ang, cur_x, cur_y, stop_reason, cur_xymove.stop_xcel_vector_valid,
 						cur_xymove.stop_xcel_vector_ang_rad);
-					if(do_follow_route)
+					if(do_follow_route) // regenerate routing pages because the map is changed now.
 					{
 						int px, py, ox, oy;
 						page_coords(cur_x, cur_y, &px, &py, &ox, &oy);
@@ -1306,6 +1533,21 @@ void* main_thread()
 						}
 					}
 				}
+				if(cmd_state == TCP_CR_DEST_MID)
+				{
+					if(tcp_client_sock >= 0)
+					{
+						msg_rc_movement_status.cur_ang = cur_ang>>16;
+						msg_rc_movement_status.cur_x = cur_x;
+						msg_rc_movement_status.cur_y = cur_y;
+						msg_rc_movement_status.status = TCP_RC_MOVEMENT_STATUS_STOPPED_BY_FEEDBACK_MODULE;
+						msg_rc_movement_status.obstacle_flags = cur_xymove.feedback_stop_flags;
+						tcp_send_msg(&msgmeta_rc_movement_status, &msg_rc_movement_status);
+					}
+
+					cmd_state = 0;
+				}
+
 			}
 		}
 		else
@@ -1318,7 +1560,7 @@ void* main_thread()
 
 		if(find_charger_state == 1)
 		{
-			motors_on = 1;
+			state_vect.v.keep_position = 1;
 			daiju_mode(0);
 			if(run_search(charger_first_x, charger_first_y, 0, 1) != 0)
 			{
@@ -1508,10 +1750,47 @@ void* main_thread()
 			}
 		}
 
+#else
+		{
+			static double prev_incr = 0.0;
+			double stamp;
+			if( (stamp=subsec_timestamp()) > prev_incr+0.15)
+			{
+				if(cur_speedlim < max_speedlim)
+				{
+					cur_speedlim++;
+					limit_speed(cur_speedlim);
+				}
+			}
+		}
+
+
+
 #endif
 
+#ifdef PULUTOF1
 
+#ifdef PULUTOF1_GIVE_RAWS
+
+		pulutof_frame_t* p_tof;
+		if( (p_tof = get_pulutof_frame()) )
+		{
+			if(tcp_client_sock >= 0)
+			{
+#ifdef PULUTOF_EXTRA
+				tcp_send_picture(p_tof->dbg_id, 2, 160, 60, p_tof->dbg);
+#endif
+				tcp_send_picture(100,           2, 160, 60, (uint8_t*)p_tof->depth);
+#ifdef PULUTOF_EXTRA
+				tcp_send_picture(110,           2, 160, 60, (uint8_t*)p_tof->uncorrected_depth);
+#endif
+			}
+
+		}
+
+#else
 		tof3d_scan_t *p_tof;
+
 		if( (p_tof = get_tof3d()) )
 		{
 
@@ -1520,18 +1799,28 @@ void* main_thread()
 				static int hmap_cnt = 0;
 				hmap_cnt++;
 
-				if(hmap_cnt >= 1)
+				if(hmap_cnt >= 4)
 				{
-					//printf("Send hmap\n");
-					tcp_send_hmap(TOF3D_HMAP_XSPOTS, TOF3D_HMAP_YSPOTS, cur_ang, cur_x, cur_y, TOF3D_HMAP_SPOT_SIZE, p_tof->objmap);
-					//printf("Done\n");
+					tcp_send_hmap(TOF3D_HMAP_XSPOTS, TOF3D_HMAP_YSPOTS, p_tof->robot_pos.ang, p_tof->robot_pos.x, p_tof->robot_pos.y, TOF3D_HMAP_SPOT_SIZE, p_tof->objmap);
+
+					if(send_raw_tof >= 0 && send_raw_tof < 4)
+					{
+						tcp_send_picture(100, 2, 160, 60, (uint8_t*)p_tof->raw_depth);
+						tcp_send_picture(101, 2, 160, 60, (uint8_t*)p_tof->ampl_images[send_raw_tof]);
+					}
+
 					hmap_cnt = 0;
+
+					if(send_pointcloud)
+					{
+						save_pointcloud(p_tof->n_points, p_tof->cloud);
+					}
 				}
 			}
 
 			static int32_t prev_x, prev_y, prev_ang;
 
-			if(mapping_on && !pwr_status.charging && !pwr_status.charged)
+			if(!flush_3dtof && state_vect.v.mapping_3d && !pwr_status.charging && !pwr_status.charged)
 			{
 				if(p_tof->robot_pos.x != 0 || p_tof->robot_pos.y != 0 || p_tof->robot_pos.ang != 0)
 				{
@@ -1572,8 +1861,11 @@ void* main_thread()
 				}
 			}
 
-		}
+			if(flush_3dtof) flush_3dtof--;
 
+		}
+#endif
+#endif
 
 
 
@@ -1589,6 +1881,12 @@ void* main_thread()
 				{
 					cur_speedlim++;
 					//printf("cur_speedlim++ to %d\n", cur_speedlim);
+					limit_speed(cur_speedlim);
+				}
+
+				if(cur_speedlim > max_speedlim)
+				{
+					cur_speedlim--;
 					limit_speed(cur_speedlim);
 				}
 			}
@@ -1650,6 +1948,7 @@ void* main_thread()
 						msg_rc_pos.ang = cur_ang>>16;
 						msg_rc_pos.x = cur_x;
 						msg_rc_pos.y = cur_y;
+						msg_rc_pos.cmd_state = cmd_state;
 						tcp_send_msg(&msgmeta_rc_pos, &msg_rc_pos);
 					}
 					curpos_send_cnt = 0;
@@ -1658,7 +1957,7 @@ void* main_thread()
 				page_coords(p_lid->robot_pos.x, p_lid->robot_pos.y, &idx_x, &idx_y, &offs_x, &offs_y);
 				load_25pages(&world, idx_x, idx_y);
 
-				if(mapping_on)
+				if(state_vect.v.mapping_collisions)
 				{
 					// Clear any walls and items within the robot:
 					clear_within_robot(&world, p_lid->robot_pos);
@@ -1672,6 +1971,7 @@ void* main_thread()
 					lidars_to_map_at_routing_start[i] = lidars_to_map_at_routing_start[i-1];
 				}
 				lidars_to_map_at_routing_start[0] = p_lid;
+
 				if(p_lid->significant_for_mapping & map_significance_mode)
 				{
 //					lidar_send_cnt = 0;
@@ -1679,100 +1979,93 @@ void* main_thread()
 
 					static int n_lidars_to_map = 0;
 					static lidar_scan_t* lidars_to_map[20];
-					if(mapping_on)
-					{
-						if(p_lid->is_invalid)
-						{
-							if(n_lidars_to_map < 5)
-							{
-								printf("Got DISTORTED significant lidar scan, have too few lidars -> mapping queue reset\n");
-								n_lidars_to_map = 0;
-							}
-							else
-							{
-								printf("Got DISTORTED significant lidar scan, running mapping early on previous images\n");
-								int32_t da, dx, dy;
-#ifdef PULUTOF1
-								prevent_3dtoffing();
-#endif
-								map_lidars(&world, n_lidars_to_map, lidars_to_map, &da, &dx, &dy);
-								INCR_POS_CORR_ID();
-								correct_robot_pos(da, dx, dy, pos_corr_id);
 
-								n_lidars_to_map = 0;
-							}
+					if(p_lid->is_invalid)
+					{
+						if(n_lidars_to_map < 3)
+						{
+							printf("Got DISTORTED significant lidar scan, have too few lidars -> mapping queue reset\n");
+							n_lidars_to_map = 0;
 						}
 						else
 						{
-							//printf("Got significant(%d) lidar scan, adding to the mapping queue(%d).\n", p_lid->significant_for_mapping, n_lidars_to_map);
-							lidars_to_map[n_lidars_to_map] = p_lid;
+							printf("Got DISTORTED significant lidar scan, running mapping early on previous images\n");
+							int32_t da, dx, dy;
 
-							n_lidars_to_map++;
-							if((good_time_for_lidar_mapping && n_lidars_to_map > 5) || n_lidars_to_map > 12)
-							{
-								if(good_time_for_lidar_mapping) good_time_for_lidar_mapping = 0;
-								int32_t da, dx, dy;
-#ifdef PULUTOF1
-								prevent_3dtoffing();
-#endif
-								map_lidars(&world, n_lidars_to_map, lidars_to_map, &da, &dx, &dy);
-								INCR_POS_CORR_ID();
-								correct_robot_pos(da, dx, dy, pos_corr_id);
+							map_lidars(&world, n_lidars_to_map, lidars_to_map, &da, &dx, &dy);
+							INCR_POS_CORR_ID();
+							correct_robot_pos(da/3, dx/3, dy/3, pos_corr_id);
 
-								// keep a few old lidars:
-								if(n_lidars_to_map > 12)
-								{
-									lidars_to_map[0] = lidars_to_map[9];
-									lidars_to_map[1] = lidars_to_map[10];
-									lidars_to_map[2] = lidars_to_map[11];
-									lidars_to_map[3] = lidars_to_map[12];
-									n_lidars_to_map = 4;
-								}
-								else
-								{
-									lidars_to_map[0] = lidars_to_map[n_lidars_to_map-2];
-									lidars_to_map[1] = lidars_to_map[n_lidars_to_map-1];
-									n_lidars_to_map = 2;
-								}
-
-							}
+							n_lidars_to_map = 0;
 						}
 					}
 					else
 					{
-						n_lidars_to_map = 0;
+						//printf("Got significant(%d) lidar scan, adding to the mapping queue(%d).\n", p_lid->significant_for_mapping, n_lidars_to_map);
+						lidars_to_map[n_lidars_to_map] = p_lid;
+
+						n_lidars_to_map++;
+
+
+						if((state_vect.v.localize_with_big_search_area && n_lidars_to_map > 11) ||
+						   (!state_vect.v.localize_with_big_search_area &&
+							((good_time_for_lidar_mapping && n_lidars_to_map > 3) || n_lidars_to_map > 4)))
+						{
+							if(good_time_for_lidar_mapping) good_time_for_lidar_mapping = 0;
+							int32_t da, dx, dy;
+
+							map_lidars(&world, n_lidars_to_map, lidars_to_map, &da, &dx, &dy);
+							INCR_POS_CORR_ID();
+
+							if(state_vect.v.localize_with_big_search_area)
+								correct_robot_pos(da, dx, dy, pos_corr_id);
+							else
+								correct_robot_pos(da/2, dx/2, dy/2, pos_corr_id);
+							n_lidars_to_map = 0;
+						}
 					}
 
 				}
 
 			}
 
-			if(motors_on)
+		}
+
+		static uint8_t prev_keep_position;
+		if(!state_vect.v.keep_position && prev_keep_position)
+			release_motors();
+		prev_keep_position = state_vect.v.keep_position;
+
+		static uint8_t prev_autonomous;
+		if(state_vect.v.command_source && !prev_autonomous)
+		{
+			daiju_mode(0);
+			routing_set_world(&world);
+			start_automapping_skip_compass();
+			state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
+		}
+		if(!state_vect.v.command_source && prev_autonomous)
+		{
+			stop_automapping();
+		}
+		prev_autonomous = state_vect.v.command_source;
+
+		static int keepalive_cnt = 0;
+		if(++keepalive_cnt > 500)
+		{
+			keepalive_cnt = 0;
+			if(state_vect.v.keep_position)
 				send_keepalive();
 			else
 				release_motors();
 		}
 
-/*
-		pulutof_frame_t* p_tof;
-		if( (p_tof = get_pulutof_frame()) )
-		{
-			if(tcp_client_sock >= 0)
-			{
-				tcp_send_picture(p_tof->dbg_id, 2, 160, 60, p_tof->dbg);
-				tcp_send_picture(100,           2, 160, 60, (uint8_t*)p_tof->depth);
-				tcp_send_picture(110,           2, 160, 60, (uint8_t*)p_tof->uncorrected_depth);
-//				tcp_send_picture(101,           1, 160, 60, p_tof->ambient);
-			}
-
-		}
-*/
 
 		sonar_point_t* p_son;
 		if( (p_son = get_sonar()) )
 		{
 			if(tcp_client_sock >= 0) tcp_send_sonar(p_son);
-			if(mapping_on)
+			if(state_vect.v.mapping_2d)
 				map_sonars(&world, 1, p_son);
 		}
 
@@ -1798,18 +2091,16 @@ void* main_thread()
 			{
 				if(tcp_client_sock >= 0) tcp_send_sync_request();
 			}
-			if(tcp_client_sock >= 0) tcp_send_battery();
-
-			static int automap_started = 0;
-			if(!automap_started)
+			if(tcp_client_sock >= 0)
 			{
-				automap_started = 1;
-//				start_automapping_from_compass();
+				tcp_send_battery();
+				tcp_send_statevect();
 			}
 
 			fflush(stdout); // syncs log file.
 
 		}
+
 	}
 
 #ifdef PULUTOF1
@@ -1842,11 +2133,14 @@ int main(int argc, char** argv)
 		printf("ERROR: tof3d access thread creation, ret = %d\n", ret);
 		return -1;
 	}
-	if( (ret = pthread_create(&thread_tof2, NULL, pulutof_processing_thread, NULL)) )
-	{
-		printf("ERROR: tof3d processing thread creation, ret = %d\n", ret);
-		return -1;
-	}
+
+	#ifndef PULUTOF1_GIVE_RAWS
+		if( (ret = pthread_create(&thread_tof2, NULL, pulutof_processing_thread, NULL)) )
+		{
+			printf("ERROR: tof3d processing thread creation, ret = %d\n", ret);
+			return -1;
+		}
+	#endif
 #endif
 
 	pthread_join(thread_main, NULL);
