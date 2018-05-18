@@ -97,6 +97,7 @@
 #define MAX_CONFIGURABLE_SPEEDLIM 70
 
 
+// Sorry I worked on a 27' inch screen .... You'll have to scroll right and left to see the comments...
 // Our task here is to restructure the existing rn1host code. The main thread should be divided in different sub-threads : Mapping, Routing, Navigation and Communication. To reach this, we have first divided the main thread in different functions, created from 
 // the existing code in the main thread. It was just a work of Copy-Paste. Like this, the main thread is easier to read and to modify. These functions are made so they can be used as the starting point of the new threads. Right now, the multithreading has not been  
 // developped yet (Still, you can find some of the future changes written as commentaries). This version sompiles, and should not modify any behaviour in the robot. That's why we commit it, as a saving point in the developpement before going further in the multi-
