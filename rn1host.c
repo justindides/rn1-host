@@ -134,6 +134,7 @@ Shared memory acces :
 // Threading structure. It contains every mutex or condition that we use to manage the multithreading.
 
 
+
 typedef struct
 {
 	pthread_t thread_navigation; 	// Threads declaration
@@ -375,6 +376,7 @@ void save_pointcloud(int n_points, xyz_t* cloud)
 	pc_cnt++;
 	if(pc_cnt > 99999) pc_cnt = 0;
 }
+
 
 
 int cal_x_d_offset = 0;
