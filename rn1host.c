@@ -96,56 +96,95 @@
 #define DEFAULT_SPEEDLIM 45
 #define MAX_CONFIGURABLE_SPEEDLIM 70
 
+/*
+	 Our task here is to restructure the existing rn1host code. The main thread should be divided in different 
+ sub-threads : Mapping, Routing, Navigation and Communication. To reach this, we have first divided the main 
+ thread in different functions, created from the existing code in the main thread. It was just a work of Copy-Paste. 
+ Like this, the main thread is easier to read and to modify. These functions are made so they can be used as the 
+ starting point of the new threads. The point is to always have a version that compiles. The final goal is to have 
+ the same robot behaviour than before but with the possibility to modify and add new things to the code easier.
+ The new threads starting points are route_fsm : navigation, routing_thread : routing, mapping_handling : mapping,
+ communication_handling : communication. Routing_thread, mapping_handling and communication_handling are new functions.
 
-// Our task here is to restructure the existing rn1host code. The main thread should be divided in different sub-threads : Mapping, Routing, Navigation and Communication. To reach this, we have first divided the main thread in different functions, created from 
-// the existing code in the main thread. It was just a work of Copy-Paste. Like this, the main thread is easier to read and to modify. These functions are made so they can be used as the starting point of the new threads. Right now, the multithreading has not been  
-// developped yet (Still, you can find some of the future changes written as commentaries). This version sompiles, and should not modify any behaviour in the robot. That's why we commit it, as a saving point in the developpement before going further in the multi-
-// -threading management.
-// There are way more informations on this drive : https://docs.google.com/document/d/11pe03oysKdM3qin7-PSHSF_nNU7izzTMOuq2cZETWFc/edit#   . I don't know if you can access it... Otherwise send me an email at justindides@hotmail.fr so I can give you the access to it or 
-// for further questions.
+Shared memory acces :
+	 Right now on this version, the restructuration is done and it should compile but it surely won't work on the robot 
+ since the different threads access to shared memory is not protected yet. There should be some conflict between the threads
+ to read or wright variables at the same time. I believe the TCP/IP and UART buffers or the global variables such as world w
+ could meet these problems. Mutex or semaphores can be used to protect memory areas. 
 
-
-
-/* Justin´s code */
-/*  My function declaration */
-int find_charger_procedure(void);
-void main_init(void);
-void communication_handling(void);  // Starting point of the communication thread
-void cmd_from_developer_to_host(int);
-void cmd_from_client_to_host(int);
-void mapping_handling(void);	// Starting point of the mapping thread
-void tof_handling(void);
-void lidar_handling(void);
-void route_fsm(void);
-void do_live_obstacle_checking(void);
-int run_search(int32_t, int32_t, int, int);
-int rerun_search(void);
-void send_route_end_status(uint8_t);
-
+ 	Right now, the navigation thread and routing thread wait for eachother to run, in a way that the navigation asks for a routing
+ when it is needed. So there shouldn't be conflict between those. On the other hand, the mapping thread is running non stop in an
+ infinite loop, so there could be conflicts between this one and the others. 
+	
+	 Concerning the communication thread, it concerns the incomming orders from the developer console commands or the user commands from
+ the client. This thread shouldn't run continuously and wait for a command to come in to run it. But, when a command comes in concerning 
+ the robot behaviour like its navigation, routing or mapping we should stop the concerned threads to run the command. The question is,
+ should we cancel the threads concerned by a command or should we wait until the end of their loops. The answer concerns the priority 
+ of the comming order, if it is a critical order like "Stop", or "go there manually", we should do this immediatly and so cancel the
+ thread, run the comand (paramaters changes ect...), then recreate the thread and continue. If the order is not so important, we should 
+ wait until the end of the concerned thread loop. Incoming message priority doesn't exist yet, but the refactoring has been done like
+ if 3 priority bits existed just to give an idea of how the threads should be managed when a command comes in.
+ 
+	 There are way more informations on this drive : https://docs.google.com/document/d/11pe03oysKdM3qin7-PSHSF_nNU7izzTMOuq2cZETWFc/edit#  
+ I don't know if you can access it... Otherwise send me an email at justindides@hotmail.fr so I can give you the access to it or 
+ to answer further questions.
+*/
 
 
 // Threading structure. It contains every mutex or condition that we use to manage the multithreading.
 
-/*
 
 typedef struct
 {
-	// pthread_t thread_navigation; 
+	pthread_t thread_navigation; 	// Threads declaration
 	pthread_t thread_mapping; 
 	pthread_t thread_routing;
- 	// pthread_t thread_communication;
+ 	pthread_t thread_communication;
+	pthread_t thread_tof, thread_tof2;
 
-	pthread_mutex_t mutex_token_routing;  // This mutex define what thread is running between the navigation and the routing. This can only work in our case where we only have one routing thread
+	pthread_mutex_t mutex_token_routing;  // This mutex define what thread is running between the navigation and the routing. This can only work in our case where we only have one routing thread.
 
 	pthread_cond_t cond_need_routing;     // When you need a routing, this condition becomes true.
-	pthread_cond_t cond_routing_done;	// When routing is over, this condition is true
+	
+	pthread_cond_t cond_continue_map, cond_continue_rout, cond_continue_nav;
 
+	pthread_cond_t cond_routing_done, cond_mapping_done, cond_navigation_done; // These conditions are signaled at the end of the Threads loop.
+	
 	int dest_x, dest_y, dont_map_lidars, no_tight;
-	int route_not_found = 1;  // 1 = No route was found, 0 = A route has been found 
+	int no_route_found;  // 1 = No route was found, 0 = A route has been found 
+
+	int map_thread_cancel_state, rout_thread_cancel_state, nav_thread_cancel_state;	// Define if the threads can be canceled by pthread_cancel() : 1 = yes, 0 = no, can't be canceled at the moment.
+	
+	int map_thread_were_canceled, rout_thread_were_canceled, nav_thread_were_canceled;	// Defines if the thread has been canceled and should be recreated after running a command : 1 = canceled, 0 = not_canceled 
+
+	int waiting_for_map_to_end, waiting_for_rout_to_end, waiting_for_nav_to_end;	// Flags put to 1 when we are waiting the end of a thread loop.
+
+	pthread_mutex_t mutex_waiting_map_t, mutex_waiting_rout_t, mutex_waiting_nav_t;   // Those mutex are used when we are waiting a thread to end its loop. It is used with the condition waiting.
+
+	int map_thread_on_pause, rout_thread_on_pause, nav_thread_on_pause;	// When we pause a thread to run a command, those flags are put to 1.
 }
-thread_structure;
- 
-*/
+thread_struct;
+
+
+
+
+/*  functions declaration */
+int find_charger_procedure(thread_struct**);
+void main_init(void);
+void communication_handling(thread_struct*);  // Starting point of the communication thread
+void cmd_from_developer_to_host(int, thread_struct**);
+void cmd_from_client_to_host(int, thread_struct**);
+void mapping_handling(thread_struct*);	// Starting point of the mapping thread
+void tof_handling(void);
+void lidar_handling(void);
+void route_fsm(thread_struct*);	// Starting point of the navigation thread
+void do_live_obstacle_checking(void);
+void routing_thread(thread_struct*);	// Starting point of the routing thread
+int run_search(int32_t, int32_t, int, int);
+int rerun_search(void);
+void send_route_end_status(uint8_t);
+void thread_management_before_running_cmd(unsigned char, thread_struct**);
+int thread_management_after_running_cmd(thread_struct**);
 
 
 
@@ -338,7 +377,6 @@ void save_pointcloud(int n_points, xyz_t* cloud)
 }
 
 
-
 int cal_x_d_offset = 0;
 int cal_y_d_offset = 0;
 float cal_x_offset = 40.0;
@@ -355,163 +393,86 @@ int flush_3dtof = 0;   // Put in global because of the main division.
 int lidar_ignore_over = 0;   // Put in global because of the main division.
 int find_charger_state = 0;   // To complicated to use it with pointers, way easier in global. This is the finding charger procedure state. 0 = Not looking for the charger at the moment.
 
-void* main_thread()
-{
-	/*
-	thread_struct host_t = {
-				   .mutex_token_routing = PTHREAD_MUTEX_INITIALIZER,
-				   .cond_need_routing = PTHREAD_COND_INITIALIZER,
-				   .cond_routing_done = PTHREAD_COND_INITIALIZER,
-				};   */
-
-	main_init();	// Init variables and communication
-		
-	while(1)
-	{
-		
-
-/*		if( (ret = pthread_create(&host_t.thread_communication, NULL, communication_handling, &host_t )) )// JAI MIS LE FIND CHARGER STATE DANS LE ROUTE, FAUT REGLER LES PROBL DE PARAMETRE	
-		{
-			printf("ERROR: communication thread creation failed, ret = %d\n", ret);
-			return -1;
-		}
-			
-		// Mapping Thread 
-		if( (ret = pthread_create(&host_t.thread_mapping, NULL, mapping_handling, &host_t)) 
-		{
-			printf("ERROR: maping thread creation failed, ret = %d\n", ret);
-			return -1;
-		}		
-
-		// Navigation Thread
-		if( (ret = pthread_create(&host_t.thread_navigation, NULL, route_fsm, &host_t)) 
-		{
-			printf("ERROR: navigation thread creation failed, ret = %d\n", ret);
-			return -1;
-		}
-
-		// Routing thread
-		if( (ret = pthread_create(&host_t.thread_routing, NULL, routing_thread, &host_t)) 
-		{
-			printf("ERROR: navigation thread creation failed, ret = %d\n", ret);
-			return -1;
-		}		*/
-		
-		communication_handling();   // Handle communications CLIENT/SERVER <-> HOST and devs comamnds from standard input. Init the UART as well.
-
-
-		route_fsm();
-
-		mapping_handling();   //Handles mapping
-
-
-
-		// Don't know what to do with that following part yet. I guess I'll put this in the handle_mapping() funion.
-		static uint8_t prev_keep_position;
-		if(!state_vect.v.keep_position && prev_keep_position)
-			release_motors();
-		prev_keep_position = state_vect.v.keep_position;
-
-		static uint8_t prev_autonomous;
-		if(state_vect.v.command_source && !prev_autonomous)
-		{
-			daiju_mode(0);
-			routing_set_world(&world);
-			start_automapping_skip_compass();
-			state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
-		}
-		if(!state_vect.v.command_source && prev_autonomous)
-		{
-			stop_automapping();
-		}
-		prev_autonomous = state_vect.v.command_source;
-
-		static int keepalive_cnt = 0;
-		if(++keepalive_cnt > 500)
-		{
-			keepalive_cnt = 0;
-			if(state_vect.v.keep_position)
-				send_keepalive();
-			else
-				release_motors();
-		}
-
-
-		sonar_point_t* p_son;
-		if( (p_son = get_sonar()) )
-		{
-			if(tcp_client_sock >= 0) tcp_send_sonar(p_son);
-			if(state_vect.v.mapping_2d)
-				map_sonars(&world, 1, p_son);
-		}
-
-		static double prev_sync = 0;
-		double stamp;
-
-		double write_interval = 30.0;
-		if(tcp_client_sock >= 0)
-			write_interval = 7.0;
-
-		if( (stamp=subsec_timestamp()) > prev_sync+write_interval)
-		{
-			prev_sync = stamp;
-
-			int idx_x, idx_y, offs_x, offs_y;
-			page_coords(cur_x, cur_y, &idx_x, &idx_y, &offs_x, &offs_y);
-
-			// Do some "garbage collection" by disk-syncing and deallocating far-away map pages.
-			unload_map_pages(&world, idx_x, idx_y);
-
-			// Sync all changed map pages to disk
-			if(save_map_pages(&world))
-			{
-				if(tcp_client_sock >= 0) tcp_send_sync_request();
-			}
-			if(tcp_client_sock >= 0)
-			{
-				tcp_send_battery();
-				tcp_send_statevect();
-			}
-
-			fflush(stdout); // syncs log file.
-
-		}
-
-	}
-
-#ifdef PULUTOF1
-	request_tof_quit();
-#endif
-
-	return NULL;
-}
-
-
 #ifdef PULUTOF1
 void* start_tof(void*);
 #endif
 
 int main(int argc, char** argv)
 {
-	pthread_t thread_main, thread_tof, thread_tof2;
 
 	int ret;
 
-	if( (ret = pthread_create(&thread_main, NULL, main_thread, NULL)) )
+	thread_struct host_t = 
 	{
-		printf("ERROR: main thread creation, ret = %d\n", ret);
+		.mutex_token_routing = PTHREAD_MUTEX_INITIALIZER,
+		.cond_need_routing = PTHREAD_COND_INITIALIZER,
+		.cond_continue_map = PTHREAD_COND_INITIALIZER, .cond_continue_rout = PTHREAD_COND_INITIALIZER, .cond_continue_nav = PTHREAD_COND_INITIALIZER,
+		.cond_routing_done = PTHREAD_COND_INITIALIZER, .cond_mapping_done = PTHREAD_COND_INITIALIZER, .cond_navigation_done = PTHREAD_COND_INITIALIZER,
+		.dest_x = 0, .dest_y = 0, .dont_map_lidars = 0, .no_tight= 1,
+		.no_route_found = 1,  // 1 = No route was found, 0 = A route has been found 
+
+
+		.map_thread_cancel_state = 1, .rout_thread_cancel_state = 1, .nav_thread_cancel_state = 1,	// Define if the threads can be canceled by pthread_cancel() : 1 = yes, 0 = no, can't
+														// be canceled at the moment.
+	
+		.map_thread_were_canceled = 0, .rout_thread_were_canceled = 0, .nav_thread_were_canceled = 0,	// Defines if the thread has been canceled and should be recreated after running a 
+														// command : 1 = canceled, 0 = not_canceled 
+
+		.waiting_for_map_to_end = 0, .waiting_for_rout_to_end = 0, .waiting_for_nav_to_end = 0,	// Flags put to 1 when we are waiting the end of a thread loop.	
+
+		.mutex_waiting_map_t = PTHREAD_MUTEX_INITIALIZER, .mutex_waiting_rout_t = PTHREAD_MUTEX_INITIALIZER, .mutex_waiting_nav_t = PTHREAD_MUTEX_INITIALIZER,   
+
+		.map_thread_on_pause = 0, .rout_thread_on_pause = 0, .nav_thread_on_pause = 0,	// When we pause a thread to run a command, those flags are put to 1.
+
+	};   
+
+	
+	main_init();	// Init variables and communication
+	
+
+	//communication_handling(&host_t);
+
+	// Communication thread : Handle communications CLIENT/SERVER <-> HOST and devs comamnds from standard input. Init the UART as well.
+	if( (ret = pthread_create(&host_t.thread_communication, NULL, communication_handling, &host_t )) !=0 )
+	{
+		printf("ERROR: communication thread creation failed, ret = %d\n", ret);
+		return -1;
+	}
+		
+	// Mapping Thread 
+	if( (ret = pthread_create(&host_t.thread_mapping, NULL, mapping_handling, &host_t)) != 0) 
+	{
+		printf("ERROR: maping thread creation failed, ret = %d\n", ret);
+		return -1;
+	}		
+
+	// Navigation Thread
+	if( (ret = pthread_create(&host_t.thread_navigation, NULL, route_fsm, &host_t)) != 0) 
+	{
+		printf("ERROR: navigation thread creation failed, ret = %d\n", ret);
 		return -1;
 	}
 
+	// Routing thread
+	if( (ret = pthread_create(&host_t.thread_routing, NULL, routing_thread, &host_t)) != 0) 
+	{
+		printf("ERROR: routing thread creation failed, ret = %d\n", ret);
+		return -1;
+	}		
+	   
+	//mapping_handling();
+
+
+
 #ifdef PULUTOF1
-	if( (ret = pthread_create(&thread_tof, NULL, pulutof_poll_thread, NULL)) )
+	if( (ret = pthread_create(&host_t.thread_tof, NULL, pulutof_poll_thread, NULL)) )
 	{
 		printf("ERROR: tof3d access thread creation, ret = %d\n", ret);
 		return -1;
 	}
 
 	#ifndef PULUTOF1_GIVE_RAWS
-		if( (ret = pthread_create(&thread_tof2, NULL, pulutof_processing_thread, NULL)) )
+		if( (ret = pthread_create(&host_t.thread_tof2, NULL, pulutof_processing_thread, NULL)) )
 		{
 			printf("ERROR: tof3d processing thread creation, ret = %d\n", ret);
 			return -1;
@@ -519,11 +480,15 @@ int main(int argc, char** argv)
 	#endif
 #endif
 
-	pthread_join(thread_main, NULL);
+	pthread_join(host_t.thread_communication, NULL); // This thread never end so this should block the main().
 
 #ifdef PULUTOF1
 	pthread_join(thread_tof, NULL);
 	pthread_join(thread_tof2, NULL);
+#endif
+
+#ifdef PULUTOF1		// This shouldn t be there
+	request_tof_quit();
 #endif
 
 	return retval;
@@ -577,7 +542,7 @@ void main_init(void)
 /***********************************************************************************************************************************************************************************************************************************************************************/
 /***********************************************************************************************************************************************************************************************************************************************************************/
 
-																// NAVIGATION THREAD
+					// NAVIGATION THREAD
 
 /*
 *
@@ -585,7 +550,7 @@ void main_init(void)
 rerouting fails (no route found), the robot will go daiju mode to find a position where you can reroute. To do this, it uses the movement (hwdata) and routing functions such as : move_to(), turn_abs_and_go_rel(), line_of_sight(), check_drect_route, test_robot_turning...  "Micronavi" variables are informations comming directly from the microcontroller (Brain). This allows a direct  
 *
 * Input parameters:
-* none
+* p_host_t : Pointer toward the general treading structure.
 *
 * Input memory areas:
 * static int micronavi_stops; static double timestamp;double stamp; static int creep_cnt; int creep amount; int dx/y;int ang; int dest_x/y;int id; int prev_incr
@@ -598,7 +563,7 @@ start_route; id_cnt;good_time_for_lidar_mapping;cur_x/y; the_route[route_pos].x/
 *  none (void)
 */
 
-void route_fsm()
+void route_fsm(thread_struct* p_host_t)
 {
 	static int micronavi_stops = 0;
 	static double timestamp;
@@ -607,6 +572,8 @@ void route_fsm()
 
 	while(1)
 	{	
+
+		pthread_mutex_lock (&p_host_t->mutex_token_routing);
 
 		if(lookaround_creep_reroute)
 		{
@@ -646,7 +613,10 @@ void route_fsm()
 				if(doing_autonomous_things()) // The robot is mapping, we'll research for a route
 				{
 					printf("Robot is mapping autonomously: no need to clear the exact route right now, skipping lookaround & creep\n");
-					rerun_search();
+					
+					pthread_cond_signal(&p_host_t->cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+					pthread_cond_wait(&p_host_t->cond_routing_done, &p_host_t->mutex_token_routing);
+
 					lookaround_creep_reroute = 0;
 				}
 				else
@@ -757,7 +727,11 @@ void route_fsm()
 				else		// If the destination angle is not reachable, we'll have to reroute. If the reroute fails => Daiju mode on, then get to step 8
 				{
 					printf("Can't turn towards the dest, rerouting.\n");
-					if(rerun_search() == 1)
+						
+					pthread_cond_signal(&p_host_t->cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+					pthread_cond_wait(&p_host_t->cond_routing_done, &p_host_t->mutex_token_routing);
+
+					if(p_host_t->no_route_found == 1)
 					{
 						printf("Routing failed in start, going to daiju mode for a while.\n");
 						send_info(INFO_STATE_DAIJUING);
@@ -806,7 +780,11 @@ void route_fsm()
 				{
 					printf("We have creeped enough (dist to waypoint=%d, creep_cnt=%d), no line of sight to the waypoint, trying to reroute\n",
 						dist, creep_cnt);
-					if(rerun_search() == 1)	// If we can't find a route, go daiju mode and move to step 8
+					
+					pthread_cond_signal(&p_host_t->cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+					pthread_cond_wait(&p_host_t->cond_routing_done, &p_host_t->mutex_token_routing);
+
+					if(p_host_t->no_route_found == 1)	// If we can't find a route, go daiju mode and move to step 8
 					{
 						printf("Routing failed in start, going to daiju mode for a while.\n");
 						daiju_mode(1);
@@ -831,11 +809,15 @@ void route_fsm()
 			{
 				printf("Daijued enough.\n");
 				daiju_mode(0);
-				if(rerun_search() == 1)
+				
+				pthread_cond_signal(&p_host_t->cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+				pthread_cond_wait(&p_host_t->cond_routing_done, &p_host_t->mutex_token_routing);
+
+				if(p_host_t->no_route_found == 1)
 				{
 					printf("Routing failed in start, going to daiju mode for a bit more...\n");
 					daiju_mode(1);
-						send_info(INFO_STATE_DAIJUING);
+					send_info(INFO_STATE_DAIJUING);
 					lookaround_creep_reroute++;
 					timestamp = subsec_timestamp();
 				}
@@ -880,7 +862,11 @@ void route_fsm()
 					else
 					{
 						printf("Micronavi STOP, too many of them already, rerouting.\n");  // After too many procedure, it will reroute.
-						if(rerun_search() == 1)
+						
+						pthread_cond_signal(&p_host_t->cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+						pthread_cond_wait(&p_host_t->cond_routing_done, &p_host_t->mutex_token_routing);
+
+						if(p_host_t->no_route_found == 1)
 						{
 							printf("Routing failed in start, todo: handle this situation.\n");
 						}
@@ -987,21 +973,44 @@ void route_fsm()
 		
 		if(find_charger_state != 0)	// Charger finding procedure. If charger_find_state is at 0, then we are not looking for the charger, no need for the procedure.
 		{
-			if(find_charger_procedure() == 0)
+			int ret = find_charger_procedure(&p_host_t);
+			if(ret == 0)
 			{
 				printf("No route found to the charger, the procedure stops (Step : %d). \n", find_charger_state);
 			}
-			else if(find_charger_procedure() == 1)
+			else if(ret == 1)
 			{
 				printf("The charger finding procedure is runing and is at Step : %d. \n", find_charger_state);
 
 			}
-			else if(find_charger_procedure() == 2)
+			else if(ret == 2)
 			{
 				printf("Success, we are at the charger, the procedure stop (Step : %d). \n", find_charger_state);
 
 			}
 		}
+		pthread_mutex_unlock (&p_host_t->mutex_token_routing);
+
+		if(p_host_t->waiting_for_nav_to_end)	// If a command is waiting to be executed after the end of this loop. Wroks with the thread_management.. functions
+		{
+			p_host_t->nav_thread_on_pause = 1;	// The thread has to be on pause while we run teh command.
+	
+			pthread_mutex_lock(&p_host_t->mutex_waiting_nav_t);				
+	
+			while(p_host_t->waiting_for_nav_to_end)
+			{
+				pthread_cond_signal(&p_host_t->cond_navigation_done);	// First, we signal the loop has ended
+			}
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_nav_t);
+
+			sleep(1);
+			
+			pthread_mutex_lock(&p_host_t->mutex_waiting_nav_t);		
+			pthread_cond_wait(&p_host_t->cond_continue_nav, &p_host_t->mutex_waiting_nav_t);	// We wait for the command to be done. 
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_nav_t);	
+		}
+
+
 	} // End of while(1) loop
 
 }
@@ -1011,7 +1020,7 @@ void route_fsm()
 This procedure is described in 8 Step (find_charger_state). 0 means you are not looking for the charger, 8 means you are charging.
  */
 
-int find_charger_procedure()
+int find_charger_procedure(thread_struct **pp_host_t)
 {
 	double chafind_timestamp = 0.0;
 
@@ -1024,7 +1033,16 @@ int find_charger_procedure()
 	{
 		state_vect.v.keep_position = 1;
 		daiju_mode(0);
-		if(run_search(charger_first_x, charger_first_y, 0, 1) != 0)
+		
+		(**pp_host_t).dest_x = charger_first_x;
+		(**pp_host_t).dest_y = charger_first_y;
+		(**pp_host_t).dont_map_lidars = 0;
+		(**pp_host_t).no_tight = 1;
+
+		pthread_cond_signal(&(**pp_host_t).cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+		pthread_cond_wait(&(**pp_host_t).cond_routing_done, &(**pp_host_t).mutex_token_routing);
+
+		if((**pp_host_t).no_route_found == 1)
 		{
 			printf("Finding charger (first point) failed.\n");
 			find_charger_state = 0;
@@ -1277,31 +1295,52 @@ void do_live_obstacle_checking()
 	}
 }
 
-																// End of NAVIGATION
+				// End of NAVIGATION
 /***********************************************************************************************************************************************************************************************************************************************************************/
 /***********************************************************************************************************************************************************************************************************************************************************************/
 
-																// ROUTING THREAD
+				// ROUTING THREAD
 
-/*
-int routing_thread(thread_struct *host_t)
+
+void routing_thread(thread_struct *p_host_t)
 {
-	int ret;
+//	int ret;
 	while(1)
 	{
-		pthread_mutex_lock(&host_t.mutex_token_routing);
+		pthread_mutex_lock(&p_host_t->mutex_token_routing);
 		printf("No need for routing now. Routing thread is waiting for a need of routing");
-		pthread_cond_wait(&host_t.cond_need_routing,&host_t.mutex_token_routing; // Gestion des erreurs a faire ? 
-
-		host_t.route_not_found = run_search(host_t.dest_x,host_t.dest_y,host_t.dont_map_lidars,host_t.no_tight);
+		pthread_cond_wait(&p_host_t->cond_need_routing,&p_host_t->mutex_token_routing); // Gestion des erreurs a faire ? 
+		
+		p_host_t->no_route_found = run_search(p_host_t->dest_x,p_host_t->dest_y,p_host_t->dont_map_lidars,p_host_t->no_tight);
 
 		printf("Routing done");
 
-		pthread_cond_signal(&host_t.cond_routing_done);
-		pthread_mutex_unlock(&host_t.mutex_token_routing);	
-	}
+		pthread_cond_signal(&p_host_t->cond_routing_done);	// We signal the routing is done. 
+		pthread_mutex_unlock(&p_host_t->mutex_token_routing);	
 
-} */
+		if(p_host_t->waiting_for_rout_to_end)	// If a command is waiting to be executed after the end of this loop. Wroks with the thread_management.. functions
+		{
+			p_host_t->rout_thread_on_pause = 1;	// The thread has to be on pause while we run teh command.
+
+			pthread_mutex_lock(&p_host_t->mutex_waiting_rout_t);				
+
+			while(p_host_t->waiting_for_rout_to_end)
+			{
+				pthread_cond_signal(&p_host_t->cond_routing_done);	// First, we signal the loop has ended
+			}
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_rout_t);
+
+			sleep(1);
+	
+			pthread_mutex_lock(&p_host_t->mutex_waiting_rout_t);		
+			pthread_cond_wait(&p_host_t->cond_continue_rout, &p_host_t->mutex_waiting_rout_t);	// We wait for the command to be done. 
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_rout_t);	
+		}
+
+		
+	}
+	return;
+} 
 
 // Search a route to go to a destination. Return 0 = Route found,  Return 1 = No route found
 int32_t prev_search_dest_x, prev_search_dest_y;
@@ -1403,7 +1442,7 @@ void send_route_end_status(uint8_t reason)
 
 
 
-// This functiom allows to run a route research with the same parameters as the last search. That means you are looking to go to the same point as the last time, but looking for another way to go to it. 
+// Not usefull anymore, the routing destination are now stocked in the threading_structure host_t. 
 int rerun_search()
 {
 	return run_search(prev_search_dest_x, prev_search_dest_y, 0, 1);
@@ -1411,14 +1450,14 @@ int rerun_search()
 
 
 
-																//end of ROUTING
+				//end of ROUTING
 /***********************************************************************************************************************************************************************************************************************************************************************/
 /***********************************************************************************************************************************************************************************************************************************************************************/
 
-																// MAPPING THREAD
+				// MAPPING THREAD
 
 // Handles the mapping. Mainly, it calls autofsm(), tof_handling() and lidar_handling().
-void mapping_handling()
+void mapping_handling(thread_struct *p_host_t)
 {
 	while(1)
 	{
@@ -1537,7 +1576,100 @@ void mapping_handling()
 
 
 		lidar_handling();
-	}
+
+		static uint8_t prev_keep_position;
+		if(!state_vect.v.keep_position && prev_keep_position)
+			release_motors();
+		prev_keep_position = state_vect.v.keep_position;
+
+		static uint8_t prev_autonomous;
+		if(state_vect.v.command_source && !prev_autonomous)
+		{
+			daiju_mode(0);
+			routing_set_world(&world);
+			start_automapping_skip_compass();
+			state_vect.v.mapping_collisions = state_vect.v.mapping_3d = state_vect.v.mapping_2d = state_vect.v.loca_3d = state_vect.v.loca_2d = 1;
+		}
+		if(!state_vect.v.command_source && prev_autonomous)
+		{
+			stop_automapping();
+		}
+		prev_autonomous = state_vect.v.command_source;
+
+		static int keepalive_cnt = 0;
+		if(++keepalive_cnt > 500)
+		{
+			keepalive_cnt = 0;
+			if(state_vect.v.keep_position)
+				send_keepalive();
+			else
+				release_motors();
+		}
+
+
+		sonar_point_t* p_son;
+		if( (p_son = get_sonar()) )
+		{
+			if(tcp_client_sock >= 0) tcp_send_sonar(p_son);
+			if(state_vect.v.mapping_2d)
+				map_sonars(&world, 1, p_son);
+		}
+
+		static double prev_sync = 0;
+		double stamp;
+
+		double write_interval = 30.0;
+		if(tcp_client_sock >= 0)
+			write_interval = 7.0;
+
+		if( (stamp=subsec_timestamp()) > prev_sync+write_interval)
+		{
+			prev_sync = stamp;
+
+			int idx_x, idx_y, offs_x, offs_y;
+			page_coords(cur_x, cur_y, &idx_x, &idx_y, &offs_x, &offs_y);
+
+			// Do some "garbage collection" by disk-syncing and deallocating far-away map pages.
+			unload_map_pages(&world, idx_x, idx_y);
+
+			// Sync all changed map pages to disk
+			if(save_map_pages(&world))
+			{
+				if(tcp_client_sock >= 0) tcp_send_sync_request();
+			}
+			if(tcp_client_sock >= 0)
+			{
+				tcp_send_battery();
+				tcp_send_statevect();
+			}
+
+			fflush(stdout); // syncs log file.
+
+		}
+
+
+
+		if(p_host_t->waiting_for_map_to_end)	// If a command is waiting to be executed after the end of this loop. Wroks with the thread_management.. functions
+		{
+			p_host_t->map_thread_on_pause = 1;	// The thread has to be on pause while we run teh command.
+	
+			pthread_mutex_lock(&p_host_t->mutex_waiting_map_t);				
+	
+			while(p_host_t->waiting_for_map_to_end)
+			{
+				pthread_cond_signal(&p_host_t->cond_mapping_done);	// First, we signal the loop has ended
+			}
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_map_t);
+
+			sleep(1);
+			
+			pthread_mutex_lock(&p_host_t->mutex_waiting_map_t);		
+			pthread_cond_wait(&p_host_t->cond_continue_map, &p_host_t->mutex_waiting_map_t);	// We wait for the command to be done. 
+			pthread_mutex_unlock(&p_host_t->mutex_waiting_map_t);	
+		}
+	
+	} // End of while loop
+
 }
 
 
@@ -1795,7 +1927,7 @@ void lidar_handling(void)
 
 /***********************************************************************************************************************************************************************************************************************************************************************/
 /***********************************************************************************************************************************************************************************************************************************************************************/
-														// COMUNICATION THREAD
+				// COMUNICATION THREAD
 
 
 /* This function handles both communications : 
@@ -1806,8 +1938,21 @@ void lidar_handling(void)
 
 
 */
-void communication_handling()
+void communication_handling(thread_struct *p_host_t)
 {
+
+	unsigned char priority_bits = 0x00; // The last 3 bits of this will define if we have to delete or ait for the end of the running threads
+/*
+	0x00 = The new comand is not critical for any thread, not thread will be canceled, we'll just wait for them to end 
+	0x01 = The first bit concerns the mapping thread. If it is on 1, then it is critical for the mapping to run the comand asap. We'll delete the mapping thread, run the comand and finaly recreate a mapping threa.
+	0x02 = The second bit concerns the routing thread. If it is on 1, same behaviour than mapping
+	0x04 = The third bit concerns the navigation. Same.
+There are still 5 bits available on that Bytes that could be used for future Threads. 
+*/
+
+	while(1)
+	{
+
 	// Calculate fd_set size (biggest fd+1)
 		int fds_size = 	
 #ifdef SIMULATE_SERIAL
@@ -1840,10 +1985,14 @@ void communication_handling()
 		}
 
 
+// *********************** Wait for a command***************************************
+
+
+
 		if(FD_ISSET(STDIN_FILENO, &fds))	// 1) Console commands
 		{
 			int cmd = fgetc(stdin);
-		//	cmd_from_developer_to_host(cmd);  // For some reason I cannot compile the code with this line
+	//		cmd_from_developer_to_host(cmd, &p_host_t);  // For some reason I cannot compile the code with this line...
 			
 
 #ifndef SIMULATE_SERIAL	
@@ -1857,7 +2006,12 @@ void communication_handling()
 		{
 			int ret = handle_tcp_client();
 			cmd_state = ret;
-			cmd_from_client_to_host(ret);
+	
+			thread_management_before_running_cmd(priority_bits, &p_host_t);
+
+			cmd_from_client_to_host(ret, &p_host_t);	//Run the comand
+
+			thread_management_after_running_cmd(&p_host_t);
 		}
 
 		if(FD_ISSET(tcp_listener_sock, &fds))	// Handling the communication from the host to the client/server, go to tcp_parser.c for more info.
@@ -1873,7 +2027,7 @@ void communication_handling()
 //			printf("Compass ang=%.1f deg\n", ANG32TOFDEG(cur_compass_ang));
 //		}
 
-		static int micronavi_stop_flags_printed = 0;		/****************MCU FEEBACK, A CHANGER DE PLACE ? ************************************************************************************************/
+		static int micronavi_stop_flags_printed = 0;
 
 		if(cmd_state == TCP_CR_DEST_MID)
 		{
@@ -1985,12 +2139,13 @@ void communication_handling()
 		}
 		else
 			feedback_stop_flags_processed = 0;
+	} // end of while(1) loop
 
 }
 
 
 // Treat the commands from the standard input.
-void cmd_from_developer_to_host(int cmd)
+void cmd_from_developer_to_host(int cmd, thread_struct **pp_host_t)
 {
 
 #ifdef MOTCON_PID_EXPERIMENT
@@ -2149,7 +2304,7 @@ void cmd_from_developer_to_host(int cmd)
 
 
 // Treat the commands from the client
-void cmd_from_client_to_host(int cmd)
+void cmd_from_client_to_host(int cmd, thread_struct **pp_host_t)
 {
 	if(cmd == TCP_CR_DEST_MID)
 	{
@@ -2191,17 +2346,22 @@ void cmd_from_client_to_host(int cmd)
 		msg_rc_route_status.start_y = cur_y;
 
 		msg_rc_route_status.requested_x = msg_cr_route.x;
+		(**pp_host_t).dest_x = msg_cr_route.x;
 		msg_rc_route_status.requested_y = msg_cr_route.y;
+		(**pp_host_t).dest_y = msg_cr_route.y;
 		msg_rc_route_status.status = TCP_RC_ROUTE_STATUS_UNDEFINED;
 		msg_rc_route_status.num_reroutes = -1;
 
 		state_vect.v.keep_position = 1;
 		daiju_mode(0);
 		find_charger_state = 0;
-		int ret;
-		if((ret = run_search(msg_cr_route.x, msg_cr_route.y, 0, 1)) != 0)
+		
+		pthread_cond_signal(&(**pp_host_t).cond_need_routing);	// Asking for a routing to the host_t.dest_x/y
+		pthread_cond_wait(&(**pp_host_t).cond_routing_done, &(**pp_host_t).mutex_token_routing);
+
+		if((**pp_host_t).no_route_found != 0)
 		{
-			send_route_end_status(ret);
+			send_route_end_status((**pp_host_t).no_route_found);
 		}
 	}
 	else if(cmd == TCP_CR_CHARGE_MID)
@@ -2401,9 +2561,222 @@ void cmd_from_client_to_host(int cmd)
 	}
 }
 
-																//End of COMMUNICATION
+
+// When a command comes in from the client, it is most of the time to affect the behaviour of the robot. We have to manage the thread(s) concerned by the command
+// to accomplish the task the user asked. 
+// Some commands are more important than others and should be run asap (They have a priority), that leads to cancel the running threads concerned by this comand.
+// If it is not critical to run the command immediatly, then we ll just wait until the concerned thread(s) end their main loop, stop it/them, 
+// run the command and then resume it/them.
+void thread_management_before_running_cmd(unsigned char priority_bits,thread_struct** pp_host_t)
+{
+	// int ret; 
+	
+	// Mapping thread managing
+	if((priority_bits & 0x01) == 1)  // If the new comand concerns the Mapping thread and has priority over what the robot is already doing.
+	{
+		if((**pp_host_t).map_thread_cancel_state == 1)	// The map_thread_cancel_state defines if the mapping thread can be canceled. If not, we ll wait until the end of the thread loop.
+		{
+			if(pthread_cancel((**pp_host_t).thread_mapping) != 0)	// When the cancel is successfull, it returns 0.
+			{
+				printf("Error canceling mappping Thread.");
+			}
+			else
+			{
+				(**pp_host_t).map_thread_were_canceled = 1;
+				printf("Mapping thread canceled successfully.");
+			}
+		}
+		else 
+		{
+			printf("The mapping Thread cannot be canceled now, we'll wait until it ends."); // If it cannot ne canceled
+			(**pp_host_t).waiting_for_map_to_end = 1;	// This flag indicates we are waiting the end of the mapping thread loop.	
+									// The flag is used at the end of the thread so it stops and send the "work done" signal
+			pthread_mutex_lock(&(**pp_host_t).mutex_waiting_map_t); // Waiting the signal that it has ended
+			pthread_cond_wait(&(**pp_host_t).cond_mapping_done, &(**pp_host_t).mutex_waiting_map_t);
+			
+			(**pp_host_t).waiting_for_map_to_end = 0;
+
+			pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_map_t);
+			
+			printf("Mapping thread loop has ended, now on pause, run the command and resume it.");
+		}
+
+	}
+	else	// If it has no priority, we'll wait until the end of the mapping thread
+	{
+		(**pp_host_t).waiting_for_map_to_end = 1; // Flag up
+		
+		pthread_mutex_lock(&(**pp_host_t).mutex_waiting_map_t);	// Waiting the signal that it has ended
+		pthread_cond_wait(&(**pp_host_t).cond_mapping_done, &(**pp_host_t).mutex_waiting_map_t);
+		
+		(**pp_host_t).waiting_for_map_to_end = 0;
+		
+
+		pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_map_t);
+		
+		printf("Mapping thread loop has ended, now on pause, run the command and resume it..");
+	}
+
+	// Navigation thread managing, it works the same than the mapping one.
+	if((priority_bits & 0x04) == 1)  // If the new comand concerns the Navigation thread and has priority over what the robot is already doing.
+	{
+		if((**pp_host_t).nav_thread_cancel_state == 1)	
+		{
+			if(pthread_cancel((**pp_host_t).thread_navigation) != 0)
+			{
+				printf("Error canceling navigation Thread.");
+			}
+			else
+			{
+				(**pp_host_t).nav_thread_were_canceled = 1;
+				printf("Navigation thread canceled successfully.");
+			}
+		}
+		else 
+		{
+			printf("The navigation Thread cannot be canceled now, we'll wait until it ends.");
+			(**pp_host_t).waiting_for_nav_to_end = 1;	// This flag indicates we are waiting the end of the navigation thread loop.
+			
+			pthread_mutex_lock(&(**pp_host_t).mutex_waiting_nav_t);
+			pthread_cond_wait(&(**pp_host_t).cond_navigation_done, &(**pp_host_t).mutex_waiting_nav_t);
+			
+			(**pp_host_t).waiting_for_nav_to_end = 0;
+			
+			pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_nav_t);
+			
+			printf("Navigation thread loop has ended, now on pause, run the command and resume it.");
+		}
+
+	}
+	else	// If it has no priority, we'll wait until the end of the mapping thread
+	{
+		(**pp_host_t).waiting_for_nav_to_end = 1;
+		
+		pthread_mutex_lock(&(**pp_host_t).mutex_waiting_nav_t);
+		pthread_cond_wait(&(**pp_host_t).cond_navigation_done, &(**pp_host_t).mutex_waiting_nav_t);
+		
+		(**pp_host_t).waiting_for_nav_to_end = 0;
+		
+		(**pp_host_t).map_thread_on_pause = 1;
+
+		pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_nav_t);
+		
+		printf("Navigation thread loop has ended, now on pause, run the command and resume it..");
+	}
+
+
+	// Routing thread managing
+	if((priority_bits & 0x01) == 1)  // Same as before but with the routing thread
+	{
+		if((**pp_host_t).rout_thread_cancel_state == 1)	// The routing_thread_cancel_state defines if the routing thread can be canceled. 
+		{						// If not, we ll wait until the end of the thread loop.
+			if(pthread_cancel((**pp_host_t).thread_routing) != 0)	// When the cancel is successfull, it returns 0.
+			{
+				printf("Error canceling routing Thread.");
+			}
+			else
+			{
+				(**pp_host_t).rout_thread_were_canceled = 1;
+				printf("Routing thread canceled successfully.");
+			}
+		}
+		else 
+		{
+			printf("The routing Thread cannot be canceled now, we'll wait until it ends."); // If it cannot ne canceled
+			(**pp_host_t).waiting_for_rout_to_end = 1;	// This flag indicates we are waiting the end of the routing thread loop.	
+									// The flag is used at the end of the thread so it stops and send the "work done" signal
+			pthread_mutex_lock(&(**pp_host_t).mutex_waiting_rout_t); // Waiting the signal that it has ended
+			pthread_cond_wait(&(**pp_host_t).cond_routing_done, &(**pp_host_t).mutex_waiting_rout_t);
+			
+			(**pp_host_t).waiting_for_rout_to_end = 0;
+
+			pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_rout_t);
+			
+			printf("Routing thread loop has ended, now on pause, run the command and resume it.");
+		}
+
+	}
+	else	// If it has no priority, we'll wait until the end of the routing thread
+	{
+		(**pp_host_t).waiting_for_rout_to_end = 1; // Flag up
+		
+		pthread_mutex_lock(&(**pp_host_t).mutex_waiting_rout_t);	// Waiting the signal that it has ended
+		pthread_cond_wait(&(**pp_host_t).cond_routing_done, &(**pp_host_t).mutex_waiting_rout_t);
+		
+		(**pp_host_t).waiting_for_rout_to_end = 0;
+		
+
+		pthread_mutex_unlock(&(**pp_host_t).mutex_waiting_rout_t);
+		
+		printf("Routing thread loop has ended, now on pause, run the command and resume it..");
+	}
+	return;
+
+}
+
+
+// After running the command we have to remanage the threads according to what have been done before the command (thread_management_before_running_cmd())
+// If threads were canceled, then we recreate them, if some are on pause, we resume them.  
+int thread_management_after_running_cmd(thread_struct** pp_host_t)
+{
+	int ret;	
+	
+	if((**pp_host_t).map_thread_on_pause == 1)	// If one of the threads are on pause, we resume them.
+	{
+		(**pp_host_t).map_thread_on_pause = 0;
+		pthread_cond_signal(&(**pp_host_t).cond_continue_map);
+	}
+
+	if((**pp_host_t).nav_thread_on_pause == 1)
+	{
+		(**pp_host_t).nav_thread_on_pause = 0;
+		pthread_cond_signal(&(**pp_host_t).cond_continue_nav);
+	}
+
+	if((**pp_host_t).rout_thread_on_pause == 1)
+	{
+		(**pp_host_t).rout_thread_on_pause = 0;
+		pthread_cond_signal(&(**pp_host_t).cond_continue_rout);
+	}
+
+	if((**pp_host_t).map_thread_were_canceled == 1)
+	{
+		(**pp_host_t).map_thread_on_pause = 0;
+		// Mapping Thread creation
+		if((ret = pthread_create(&(**pp_host_t).thread_mapping, NULL, mapping_handling, &(**pp_host_t))) != 0)  // I have doubt if the parameter is right
+		{
+			printf("ERROR: maping thread creation failed, ret = %d\n", ret);
+			return -1;
+		}	
+	}
+
+	if((**pp_host_t).nav_thread_were_canceled == 1)		// If one of the threads were canceled, we recreate it.
+	{
+		(**pp_host_t).nav_thread_on_pause = 0;
+		// Navigation Thread creation
+		if((ret = pthread_create(&(**pp_host_t).thread_navigation, NULL, route_fsm, &(**pp_host_t))) != 0) 
+		{
+			printf("ERROR: navigation thread creation failed, ret = %d\n", ret);
+			return -1;
+		};
+	}
+
+	if((**pp_host_t).rout_thread_were_canceled == 1)
+	{
+		(**pp_host_t).rout_thread_on_pause = 0;
+		// Routing Thread creation
+		if((ret = pthread_create(&(**pp_host_t).thread_routing, NULL, routing_thread, &(**pp_host_t))) != 0)  // I have doubt if the parameter is right
+		{
+			printf("ERROR: routing thread creation failed, ret = %d\n", ret);
+			return -1;
+		}	
+	}
+
+}
+
+				//End of COMMUNICATION
 /*************************************************************************************************************************************************************************************************************************************************************************/
 /*************************************************************************************************************************************************************************************************************************************************************************/
-																// The END ?
+				// The END ?
 
 
